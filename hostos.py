@@ -2,7 +2,7 @@
 """
 Host operating system layer (added 2026-09-23).
 
-The few questions LexiPanel asks the OS, answered for Linux and macOS:
+The few questions LexiPanel asks the OS, answered for Linux, macOS, and Windows:
 memory, process details, listening ports, the GPU, where run folders live,
 and the service manager that keeps instances alive (systemd --user on Linux,
 launchd agents on macOS).
@@ -16,13 +16,19 @@ launchd agents on macOS).
          stable-diffusion.cpp, audio.cpp and Camelid). Linux-only features
          (AMD power caps, sysfs thermals and clocks, DRM residency, journald
          crash triage, Vulkan pinning) report "not available on macOS".
+  Windows is EXPERIMENTAL: memory, process, port, and NVIDIA GPU discovery
+         work. systemd, sysfs power/clocks, journald, and the AMD card path
+         report "not available on Windows". Instances are started directly,
+         not as services.
 """
 import ctypes, ctypes.util, os, platform, plistlib, re, shlex, subprocess, sys, tempfile, time
 from pathlib import Path
 
 IS_MAC = sys.platform == "darwin"
+IS_WIN = sys.platform == "win32"
 ARCH = platform.machine()                      # "arm64" on Apple Silicon, "x86_64"
 MAC_ONLY_NOTE = "not available on macOS"
+WIN_NOTE = "not available on Windows"
 
 
 def _out(cmd, timeout=10):
@@ -66,10 +72,33 @@ def _mac_mem():
     return v
 
 
+def _win_mem():
+    """MiB figures in the shape of /proc/meminfo keys, from GlobalMemoryStatusEx."""
+    class MEMORYSTATUSEX(ctypes.Structure):
+        _fields_ = [
+            ("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+            ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+            ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+            ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+    st = MEMORYSTATUSEX()
+    st.dwLength = ctypes.sizeof(st)
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+        return {}
+    mib = 1048576
+    return {"MemTotal": st.ullTotalPhys // mib, "MemAvailable": st.ullAvailPhys // mib,
+            "MemFree": st.ullAvailPhys // mib,
+            "SwapTotal": max(0, st.ullTotalPageFile - st.ullTotalPhys) // mib,
+            "SwapFree": max(0, st.ullAvailPageFile - st.ullAvailPhys) // mib}
+
+
 def meminfo_mb(key):
-    """/proc/meminfo value in MiB (Linux), or its macOS equivalent."""
+    """/proc/meminfo value in MiB (Linux), or its macOS or Windows equivalent."""
+    key = key.rstrip(":")
     if IS_MAC:
-        return _mac_mem().get(key.rstrip(":"), 0)
+        return _mac_mem().get(key, 0)
+    if IS_WIN:
+        return _win_mem().get(key, 0)
     try:
         for line in Path("/proc/meminfo").read_text().splitlines():
             if line.startswith(key):
@@ -112,8 +141,32 @@ def _procargs2(pid):
     return exe.decode(errors="replace"), argv, env
 
 
+def _win_proc(pid):
+    """(commandline, executable, parent_pid, creation, rss_bytes) or raises OSError."""
+    ps = (
+        "$p = Get-CimInstance Win32_Process -Filter \"ProcessId = %d\";"
+        "if (-not $p) { exit 1 };"
+        "Write-Output ($p.CommandLine); Write-Output '---';"
+        "Write-Output ($p.ExecutablePath); Write-Output '---';"
+        "Write-Output ($p.ParentProcessId); Write-Output '---';"
+        "Write-Output ($p.CreationDate.ToString('o')); Write-Output '---';"
+        "Write-Output ($p.WorkingSetSize)"
+    ) % int(pid)
+    r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                       capture_output=True, text=True, timeout=20)
+    if r.returncode != 0 or not r.stdout.strip():
+        raise OSError(f"no process {pid}")
+    parts = r.stdout.split("---")
+    if len(parts) < 5:
+        raise OSError(f"unreadable process {pid}")
+    return [x.strip() for x in parts[:5]]
+
+
 def proc_argv(pid):
     """argv of a process as a list; raises OSError when it cannot be read."""
+    if IS_WIN:
+        cmd = _win_proc(pid)[0]
+        return shlex.split(cmd, posix=False) + [""] if cmd else [""]
     if not IS_MAC:
         return Path(f"/proc/{pid}/cmdline").read_bytes().decode().split("\0")
     try:
@@ -126,6 +179,8 @@ def proc_argv(pid):
 
 
 def proc_environ(pid):
+    if IS_WIN:
+        return {}                                  # the panel only needs this for CUDA_VISIBLE_DEVICES on macOS
     if not IS_MAC:
         return dict(l.split("=", 1) for l in Path(f"/proc/{pid}/environ").read_bytes()
                     .decode(errors="ignore").split("\0") if "=" in l)
@@ -133,6 +188,8 @@ def proc_environ(pid):
 
 
 def proc_exe(pid):
+    if IS_WIN:
+        return _win_proc(pid)[1]
     if not IS_MAC:
         return os.path.realpath(f"/proc/{pid}/exe")
     try:
@@ -142,6 +199,13 @@ def proc_exe(pid):
 
 
 def pid_alive(pid):
+    if IS_WIN:
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        h = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+        if not h:
+            return False
+        ctypes.windll.kernel32.CloseHandle(h)
+        return True
     if not IS_MAC:
         return os.path.exists(f"/proc/{pid}")
     try:
@@ -154,6 +218,18 @@ def pid_alive(pid):
 
 
 def proc_uptime_s(pid):
+    if IS_WIN:
+        try:
+            created = _win_proc(pid)[3]
+            if not created:
+                return None
+            import datetime
+            born = datetime.datetime.fromisoformat(created)
+            if born.tzinfo is None:
+                born = born.replace(tzinfo=datetime.datetime.now().astimezone().tzinfo)
+            return int((datetime.datetime.now().astimezone() - born).total_seconds())
+        except (OSError, ValueError):
+            return None
     if IS_MAC:
         et = _out(["ps", "-o", "etime=", "-p", str(pid)]).strip()      # [[dd-]hh:]mm:ss
         if not et:
@@ -172,6 +248,12 @@ def proc_uptime_s(pid):
 
 
 def proc_rss_mb(pid):
+    if IS_WIN:
+        try:
+            raw = _win_proc(pid)[4]
+            return int(raw) // 1048576 if raw.isdigit() else None
+        except (OSError, ValueError):
+            return None
     if IS_MAC:
         kb = _out(["ps", "-o", "rss=", "-p", str(pid)]).strip()
         return int(kb) // 1024 if kb.isdigit() else None
@@ -182,12 +264,19 @@ def proc_rss_mb(pid):
 
 
 def children(pid):
+    if IS_WIN:
+        ps = ("Get-CimInstance Win32_Process -Filter \"ParentProcessId = %d\" | "
+              "ForEach-Object { $_.ProcessId }") % int(pid)
+        out = _out(["powershell", "-NoProfile", "-Command", ps])
+        return [int(x) for x in out.split() if x.isdigit()]
     out = _out(["pgrep", "-P", str(pid)])
     return [int(x) for x in out.split() if x.isdigit()]
 
 
 def open_paths(pid):
     """Paths a process holds open, mapped, or as cwd (macOS: lsof)."""
+    if IS_WIN:
+        return []
     out = _out(["lsof", "-n", "-P", "-F", "n", "-p", str(pid)], timeout=20)
     return [l[1:] for l in out.splitlines() if l.startswith("n/")]
 
@@ -198,6 +287,14 @@ def open_paths(pid):
 def port_listening(port):
     """Non-empty string if something listens on TCP `port` (the ss/lsof line)."""
     port = int(port)
+    if IS_WIN:
+        out = _out(["netstat", "-ano", "-p", "tcp"])
+        needle = f":{port}"
+        for line in out.splitlines():
+            cols = line.split()
+            if len(cols) > 1 and "LISTENING" in line and cols[1].endswith(needle):
+                return line.strip()
+        return ""
     if IS_MAC:
         return _out(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"]).strip()
     return subprocess.run(f"ss -Hltn 'sport = :{port}' 2>/dev/null", shell=True,
@@ -238,9 +335,27 @@ def mac_gpu():
 # --------------------------------------------------------------------------
 # run folders
 # --------------------------------------------------------------------------
+def win_gpus():
+    """NVIDIA cards from nvidia-smi, in panel.gpu_devices() shape. Ids are nv0,
+    nv1, ... because a PCI BDF contains ':' and cannot be a path segment on NTFS."""
+    out = _out(["nvidia-smi", "--query-gpu=index,name,memory.total",
+                "--format=csv,noheader,nounits"])
+    recs = []
+    for line in out.splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 3 or not parts[0].isdigit():
+            continue
+        idx, name, total = parts[0], parts[1], parts[2]
+        vram = int(float(total)) if total.replace(".", "", 1).isdigit() else None
+        recs.append(dict(pci=f"nv{idx}", vendor="nvidia", driver="nvidia", name=name,
+                         vram_total_mib=vram, backends=["cuda", "vulkan", "cpu"],
+                         cuda_ready=True, usable=True, notes=[]))
+    return recs
+
+
 def run_base():
     """Where instance run folders (logs, telemetry, generated configs) live."""
-    if IS_MAC:
+    if IS_MAC or IS_WIN:
         d = Path(tempfile.gettempdir()) / "lexipanel"
         d.mkdir(exist_ok=True)
         return d

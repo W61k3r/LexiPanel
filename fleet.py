@@ -7,7 +7,7 @@ Roles in fleet/config.json: standalone (default) | primary | member.
 View-only: nothing here lets the primary change a member. Reports carry what the panel already
 shows (hardware, instances, speeds, workload counts, alerts), never prompts, settings or keys.
 """
-import hashlib, json, os, re, secrets, threading, time, urllib.parse, urllib.request, uuid
+import hashlib, json, os, platform, re, secrets, threading, time, urllib.parse, urllib.request, uuid
 from pathlib import Path
 
 P = None
@@ -49,7 +49,7 @@ def _h(s):
 def config():
     c = _rj(_d() / "config.json", {})
     c.setdefault("role", "standalone")
-    c.setdefault("name", os.uname().nodename)
+    c.setdefault("name", platform.node())
     if not (_d() / "box_id").exists():
         (_d() / "box_id").write_text(str(uuid.uuid4()))
     c["box_id"] = (_d() / "box_id").read_text().strip()
@@ -262,7 +262,7 @@ def build_report():
     except Exception:
         pass
     return dict(v=1, box_id=c["box_id"], name=c["name"], sent=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                lexipanel=ver, os=os.uname().sysname + " " + os.uname().release,
+                lexipanel=ver, os=platform.system() + " " + platform.release(),
                 hardware=dict(ram_mib=P._meminfo_mb("MemTotal"), gpus=gpus, npus=npus), instances=insts,
                 shared=shared)
 

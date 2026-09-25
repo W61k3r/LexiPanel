@@ -613,6 +613,12 @@ This is still self-hosted software with a browser terminal and privileged option
 
 Treat macOS as experimental until exercised and reported by actual Apple Silicon users.
 
+## Windows (experimental)
+
+`hostos.py` answers memory, process, listening-port, and NVIDIA GPU questions on Windows. `panel.py` no longer imports `fcntl` at startup, so `python panel.py` can serve the page. Instances are started with the current Python, not a systemd unit. Sysfs clocks, AMD power caps, journald crash triage, and the DRM residency path report nothing on Windows, the same way they report nothing on macOS.
+
+The panel still binds to localhost. Point a browser at the address it prints. GPU tuning and power profiles remain Linux features.
+
 ---
 
 ## Adapting it to your box

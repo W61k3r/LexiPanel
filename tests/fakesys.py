@@ -2,7 +2,7 @@
 kernel stand-in for pp_od_clk_voltage that behaves like amdgpu's SMU13 code:
 edits are staged, 'c' commits them, 'r' restores the stock table, values outside
 OD_RANGE are refused with EINVAL."""
-import errno, os, re
+import errno, os, re, sys
 from pathlib import Path
 
 PCI = "0000:03:00.0"
@@ -23,6 +23,9 @@ def od_text(t):
 
 def build(root, od=True, vbios=b""):
     """Write the tree under root; returns the device dir."""
+    if sys.platform == "win32":
+        import unittest
+        raise unittest.SkipTest("PCI sysfs paths contain ':' and cannot be created on Windows")
     root = Path(root)
     d = root / "bus/pci/devices" / PCI
     (d / "hwmon/hwmon3").mkdir(parents=True, exist_ok=True)

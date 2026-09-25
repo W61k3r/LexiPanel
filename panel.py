@@ -9,13 +9,13 @@ tool. http.server is enough.
 Binds 127.0.0.1 only. Caddy terminates TLS and does auth in front of it.
 Never bind this to 0.0.0.0 - it starts processes and downloads files.
 """
-import fcntl, hashlib, json, os, re, shlex, shutil, struct, signal, subprocess, sys, threading, time, urllib.error, urllib.request, urllib.parse
+import hashlib, json, os, re, shlex, shutil, struct, signal, subprocess, sys, threading, time, urllib.error, urllib.request, urllib.parse
 import http.server, socketserver
 from collections import deque
 from pathlib import Path
 
 import hostos                                       # noqa: E402  (Linux/macOS layer)
-HOME       = Path.home() if hostos.IS_MAC else Path("/home/smbadmin")
+HOME       = Path.home() if (hostos.IS_MAC or hostos.IS_WIN) else Path("/home/smbadmin")
 # INF01_PANEL_DIR lets a scratch copy run beside the live panel (on another
 # PANEL_PORT) without touching the live panel's files.
 PANEL      = Path(os.environ.get("INF01_PANEL_DIR") or HOME / "panel")
@@ -913,6 +913,7 @@ def _nouveau_vram_used(pci):
         return None
     try:
         # DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_GETPARAM, {u64 param; u64 value})
+        import fcntl
         req = (3 << 30) | (16 << 16) | (ord("d") << 8) | 0x40
         buf = fcntl.ioctl(fd, req, struct.pack("QQ", 19, 0))   # NOUVEAU_GETPARAM_VRAM_USED
         return struct.unpack("QQ", buf)[1] // 1048576
@@ -4719,7 +4720,8 @@ def start_server():
             ok, msg = _systemctl("start", inst)
             return ok, ("starting via systemd --user" if ok else f"systemctl --user failed: {msg}")
         LOGS.mkdir(exist_ok=True)
-        subprocess.Popen(["/usr/bin/python3", str(PANEL / "instance_launch.py"), inst["id"]],
+        py = sys.executable if hostos.IS_WIN else "/usr/bin/python3"
+        subprocess.Popen([py, str(PANEL / "instance_launch.py"), inst["id"]],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          cwd=str(LLAMA), start_new_session=True)
         return True, ("starting by direct launch - no systemd --user bus, so it dies with "
@@ -4750,17 +4752,18 @@ def stop_server():
         return False, "not running"
     # Signal THIS instance's process only. The old 'pkill -x llama-server'
     # would have taken down every instance on the box.
-    if INST()["legacy"]:
-        subprocess.run(["pkill", "-f", "run_qwen38_vulkan_inf01"], capture_output=True)
-    else:
-        subprocess.run(["pkill", "-f", f"instance_launch.py {INST()['id']}$"], capture_output=True)
+    if not hostos.IS_WIN:
+        if INST()["legacy"]:
+            subprocess.run(["pkill", "-f", "run_qwen38_vulkan_inf01"], capture_output=True)
+        else:
+            subprocess.run(["pkill", "-f", f"instance_launch.py {INST()['id']}$"], capture_output=True)
     try:
         os.kill(pid, signal.SIGTERM)
     except OSError:
         pass
     for _ in range(30):
         _pid_cache.pop(INST()["id"], None)
-        if not os.path.exists(f"/proc/{pid}"):
+        if not hostos.pid_alive(pid):
             return True, "stopped"
         time.sleep(1)
     try:
@@ -6400,6 +6403,12 @@ def _vk_matches(dev, name):
 
 
 def gpu_devices(probe=True):
+    if hostos.IS_WIN:
+        found = hostos.win_gpus()
+        found.append(dict(pci="cpu", vendor="cpu", driver=None, name="CPU only (no GPU)",
+                          vram_total_mib=0, backends=["cpu"], cuda_ready=False, usable=True,
+                          notes=[]))
+        return found
     out = []
     try:
         pdevs = sorted(Path("/sys/bus/pci/devices").iterdir())
@@ -6925,6 +6934,8 @@ WantedBy=default.target
 
 
 def _user_env():
+    if hostos.IS_WIN:
+        return dict(os.environ)
     rt = f"/run/user/{os.getuid()}"
     return dict(os.environ, XDG_RUNTIME_DIR=rt, DBUS_SESSION_BUS_ADDRESS=f"unix:path={rt}/bus")
 
@@ -6932,6 +6943,9 @@ def _user_env():
 def user_manager():
     """Is there a systemd --user manager the panel can talk to, and will it
     survive logout / come up at boot (linger)?"""
+    if hostos.IS_WIN:
+        return dict(bus=False, linger=False,
+                    fix="Windows starts instances directly; there is no systemd user bus")
     bus = os.path.exists(f"/run/user/{os.getuid()}/bus")
     linger = os.path.exists(f"/var/lib/systemd/linger/{os.environ.get('USER') or 'smbadmin'}") \
         or os.path.exists("/var/lib/systemd/linger/smbadmin")
@@ -6940,6 +6954,8 @@ def user_manager():
 
 
 def ensure_user_unit():
+    if hostos.IS_WIN:
+        return False
     f = USER_UNIT_DIR / USER_UNIT
     if f.exists() and f.read_text() == USER_UNIT_TEXT:
         return False

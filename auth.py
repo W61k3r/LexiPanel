@@ -36,7 +36,7 @@ DIR = None
 def bind(panel_dir):
     global DIR
     DIR = Path(panel_dir) / "auth"
-    DIR.mkdir(exist_ok=True)
+    DIR.mkdir(parents=True, exist_ok=True)
     os.chmod(DIR, 0o700)
 
 
