@@ -32,30 +32,33 @@ database, no build step.
 ## Contents
 
 - [The idea](#the-idea)
+- [Where LexiPanel is unusually hard to match](#where-lexipanel-is-unusually-hard-to-match)
+- [Competitive reality](#competitive-reality)
 - [What it does](#what-it-does)
 - [Tour of the tabs](#tour-of-the-tabs)
 - [Engines](#engines)
 - [Architecture](#architecture)
 - [Install](#install)
-- [Configuration files](#configuration-files)
-- [Parameters](#parameters) → full reference in **[PARAMETERS.md](PARAMETERS.md)**
-- [HTTP API](#http-api) → full route list in **[API.md](API.md)**
-- [Safety rails](#safety-rails-learned-the-hard-way)
-- [Security](#security)
-- [Adapting it to your box](#adapting-it-to-your-box)
+- [Parameters](#parameters)
 - [Workload and auto-fit](#workload-and-auto-fit)
+- [Fit: hardware-fitted requants](#fit-hardware-fitted-requants)
 - [GPU Tuning](#gpu-tuning)
+- [Gateway and quotas](#gateway-and-quotas)
+- [Access: single-user or multi-user](#access-single-user-or-multi-user)
+- [Fleet: many boxes, one primary](#fleet-many-boxes-one-primary)
 - [MCP server](#mcp-server)
 - [GG: Graph Gauntlet](#gg-graph-gauntlet)
-- [Fit: hardware-fitted requants](#fit-hardware-fitted-requants)
+- [HTTP API](#http-api)
+- [Safety rails](#safety-rails-learned-the-hard-way)
+- [Security](#security)
 - [macOS (experimental)](#macos-experimental)
-- [ONNX Runtime: NPUs](#onnx-runtime-npus-amd-intel-qualcomm)
-- [Access: single-user or multi-user](#access-single-user-or-multi-user)
-- [Gateway and quotas](#gateway-and-quotas)
-- [Fleet: many boxes, one primary](#fleet-many-boxes-one-primary)
+- [Adapting it to your box](#adapting-it-to-your-box)
+- [Configuration files](#configuration-files)
 - [Checks before an upload](#checks-before-an-upload)
 - [File layout](#file-layout)
-- [Changelog](CHANGELOG.md)
+- [What LexiPanel is not](#what-lexipanel-is-not)
+- [Why keep building this instead of gluing tools together?](#why-keep-building-this-instead-of-gluing-tools-together)
+- [Roadmap direction](#roadmap-direction)
 - [Credits](#credits)
 
 ---
@@ -69,545 +72,463 @@ rather than rules of thumb:
 
 | Step | Where it happens |
 |---|---|
-| **Discover** | GPU and GPU Tuning tabs (cards, clocks, thermals, power, VBIOS), Power options (equipment), the GGUF reader behind the memory estimator |
+| **Discover** | GPU and GPU Tuning tabs (cards, clocks, thermals, power, VBIOS), Power options (equipment), NPU/provider readiness, the GGUF reader behind the memory estimator |
 | **Fit** | VRAM/RAM estimator and RAM budget, launch-plan preview, Fit tab requants planned per tensor for your cards |
 | **Optimize** | Optimize tab, decode-vs-depth curve, GPU Tuning benchmark |
 | **Validate** | coding and agent suites, refusal check, Diagnostics, apply-and-test with automatic revert |
-| **Operate** | instances, fallback tiers, start guard, crash forensics, power profiles |
-| **Learn** | statistics and the live decode chart judged against the measured curve, stability per power profile, benchmark history |
-| **Adapt** | Workload tab: what real requests look like (depth, length, concurrency, idle hours) and where the settings do not fit them; auto-fit measures changes in idle windows and checks every change against the next real requests |
+| **Operate** | instances, fallback tiers, start guard, gateway, access control, fleet, crash forensics, power profiles |
+| **Learn** | statistics and live decode judged against the measured curve, workload depth/concurrency/idle windows, stability per power profile, benchmark history |
+| **Adapt** | Auto-fit measures changes in idle windows and checks every change against the real requests that follow |
+| **Explain** | exact launch argv/env, refusal reasons, diagnostics evidence, per-tensor Fit reasoning, audit trail and debug bundles |
+
+The individual pieces are useful. **The loop between them is the point.** The memory estimator
+knows what other managed servers already occupy. The optimizer knows where real sessions spend
+their tokens. Fit knows the VRAM budget of a configuration that has already proved it can run.
+GPU Tuning measures the model actually served. Auto-fit checks benchmark wins against later
+production traffic. Crash triage knows what configuration and power state were in force.
+
+## Where LexiPanel is unusually hard to match
+
+**Competitive check: September 2026.** The projects below are strong and several are better than
+LexiPanel at their own layer. What I have not found in their public code/documentation is another
+self-hosted local-AI control plane that combines **all** of the following in one measured system.
+If there is one, open an issue — it deserves a link here.
+
+| Capability | What LexiPanel actually does | Closest overlap I found |
+|---|---|---|
+| **Closed-loop optimization from real traffic** | Keeps real request depth/length/concurrency history, learns idle windows, benchmarks candidates against that workload shape, can auto-apply narrowly safe speed wins, then verifies them against later real requests and rolls back regressions | [Llama Optimizer](https://github.com/VykosX/Llama-Optimizer) has a deeper dedicated Bayesian parameter search; [LumaBrowser](https://www.lumabyte.com/advanced) has strong hardware-aware fitting. Neither public design describes this same long-running traffic → experiment → later-traffic verification loop |
+| **Hardware-fitted tensor-level requantization** | Measures quant formats on the actual cards, derives a real VRAM budget from a known-running setup, plans formats per tensor/role, builds from full-precision source and verifies the result against today's model | Quantizers and runtime planners choose whole-model formats well; I did not find this end-to-end per-tensor, per-machine compile-and-verify loop integrated into another local-AI operator plane |
+| **Inference-aware electrical tuning** | Changes supported GPU clocks/undervolt/power/fan settings, benchmarks the running LLM, measures tokens/s **and tokens/joule**, watches resets/thermals and automatically restores failed trial settings | GPU tuning suites exist and inference benchmarks exist; I did not find another audited local-AI panel coupling them this tightly |
+| **Long-context performance as a first-class operating signal** | Measures decode across context depths and judges live requests against the curve at the depth each request actually reached | Many tools benchmark throughput or size context to fit; few make depth-dependent performance part of continuous operations and later tuning decisions |
+| **AI-ops over MCP without a second privilege model** | 28 MCP tools expose launch plans, memory estimates, workload/Auto-fit, GPU tuning, diagnostics, crashes, power and lifecycle through the same API checks and roles as the browser | MCP is common for giving models application tools; this is MCP used as the guarded operator interface to the machine running the models |
+| **One evidence chain from model file to physical box** | Model metadata → fit → launch argv/env → process residency → workload → optimizer → GPU/power state → crash evidence → rollback history | Other projects cover parts of this chain extremely well; the breadth of one shared evidence model is the unusual part |
+
+That is the claim LexiPanel should make loudly: **not that every individual subsystem is the best
+subsystem in existence, but that the integrated machine-fitting loop is unusually complete.**
+
+There are also several combinations that are rare enough to be meaningful on their own:
+
+- **Real-workload Auto-fit + real-traffic verification + rollback.** Benchmarking is easy to fake by
+  choosing the wrong workload. LexiPanel makes the later real requests the final judge.
+- **Per-tensor Fit + card-measured quant speeds + live VRAM budget.** The output is not merely a
+  recommendation for `Q4_K_M`; it is a build recipe tied to the cards it is meant to run on.
+- **LLM benchmark + GPU electrical controls + tokens/joule + automatic revert.** Hardware tuning is
+  evaluated in the unit that matters to the workload.
+- **Crash loops, RAM floors, silent Vulkan system-memory fallback, power profiles and firmware
+  boundaries treated as AI-serving problems rather than somebody else's problem.**
+
+## Competitive reality
+
+Bragging is useful only if the boundaries stay visible. These projects remain stronger in specific
+areas, and LexiPanel is better positioned **with** many of them than against them:
+
+| Project | Where it is stronger | Where LexiPanel is stronger/different |
+|---|---|---|
+| [llama.cpp](https://github.com/ggml-org/llama.cpp) | The inference engine itself; fastest-moving GGUF/runtime feature surface | Operates llama.cpp as part of a measured machine: fit, lifecycle, workload history, hardware/power and safety |
+| [Open WebUI](https://github.com/open-webui/open-webui) | Chat UX, RAG/knowledge, collaboration, SSO/OIDC/LDAP/SCIM and application-layer extensibility | Deeper below the API boundary; Open WebUI is a natural frontend for LexiPanel rather than something LexiPanel should reimplement |
+| [LumaBrowser](https://www.lumabyte.com/) | Cross-platform packaging, guided hardware-aware setup, browser automation, agent UX, multiple runtimes and polished GPU placement/hot-swap behavior | Deeper Linux host control, real-workload feedback, tensor-level Fit, GPU electrical tuning, power/crash evidence and guarded server operations |
+| [Llama Optimizer](https://github.com/VykosX/Llama-Optimizer) | GP/Bayesian search, topology/context sweeps and dedicated MTP/IK-llama optimization methodology | Broader closed loop around optimization: ongoing workload observation, safe apply/propose policy, later real-traffic verification and rollback |
+| [llama-swap](https://github.com/mostlygeek/llama-swap) | Generic, mature demand-driven hot swapping of arbitrary OpenAI/Anthropic-compatible servers | Much deeper machine fit, measurement, model build/quant, host safety and hardware operation |
+| [LocalAI](https://localai.io/) | 60+ backends, modality breadth, backend plugins, federation, production distributed mode and model sharding | Fewer engines but much deeper bare-metal tuning and evidence on one machine |
+| [Lemonade](https://github.com/lemonade-sdk/lemonade) | AI-PC/NPU experience, AMD-optimized heterogeneous execution, embeddable local server and broad desktop-platform support | Deeper workstation/server operations, host power/GPU tuning, workload adaptation and quant fitting |
+| [LM Studio](https://lmstudio.ai/) | Polished desktop and headless local-model experience, model discovery and developer ergonomics | Operator transparency and machine-level control |
+| [Ollama](https://github.com/ollama/ollama) | Simplicity: install, pull, run; automatic scheduling and placement | Explainability and explicit control over how the machine is fitted and optimized |
+| [KoboldCpp](https://github.com/LostRuins/koboldcpp) | Remarkable one-file portability and multimodal breadth | Multi-instance host management, optimization, fitting, GPU/power operation and machine forensics |
+| [ComfyUI](https://github.com/Comfy-Org/ComfyUI) | Generative-media graph authoring and ecosystem | Operating inference services and hardware, not authoring creative graphs |
+| [vLLM](https://github.com/vllm-project/vllm) | High-throughput accelerator serving, tensor/pipeline/data/expert parallelism and multi-node production deployment | Bare-metal local/workstation optimization and small-fleet operations rather than datacenter scheduling |
+
+The practical stack can therefore be compositional:
+
+```text
+people / agents / applications
+        │
+        ├── Open WebUI / another chat app
+        ├── Hermes / Claude Code / MCP clients
+        └── OpenAI-compatible clients
+                    │
+                    ▼
+               LexiPanel
+      access · gateway · MCP · fleet
+                    │
+      ┌─────────────┼──────────────┬─────────────┐
+      ▼             ▼              ▼             ▼
+  llama.cpp     sd.cpp         audio.cpp      ONNX/Camelid
+      │             │              │             │
+      └─────────────┴──────────────┴─────────────┘
+                    │
+                    ▼
+       fit · benchmark · auto-fit
+       VRAM/RAM · GPU · power · OS
+```
+
+---
 
 ## What it does
 
-- **Instances.** Run any number of inference servers side by side, each pinned to the GPU(s)
-  you pick (one card, another card, both, or CPU-only), each with its own parameters, port,
-  logs, statistics and `systemd --user` unit (`LexiPanel-inst@<id>`). The original server stays
-  as the legacy `main` instance on its own system unit.
-- **Five engines, one workflow.** llama.cpp for text and vision chat, stable-diffusion.cpp
-  for images, audio.cpp for TTS, voice cloning, transcription, music and sound effects, and
-  Camelid, a Rust GGUF chat engine with its own chat/agent web UI (CPU or NVIDIA), and ONNX
-  Runtime for ONNX models on the CPU or an NPU (AMD Ryzen AI, Intel, Qualcomm).
-  Create, configure, start, stop and monitor them all the same way.
-- **Every parameter, explained.** 220+ settings in grouped forms, each with a plain-English
-  tooltip. Anything the form does not cover is still reachable: the *All build options*
-  list parses the active build's `--help` and lets you tick any flag.
-- **Preview before you launch.** The launch plan shows the exact argv and environment a
-  start will use, plus the errors that would refuse it and the warnings that would make it
-  slow — before anything runs.
-- **Memory you can trust.** A VRAM/RAM estimator that reads the KV-cache shape from the
-  model's GGUF header, measures real overhead from the running process, subtracts what other
-  servers already hold on the same card, and refuses a start that would run the host out of
-  RAM.
-- **Fallback tiers.** `normal` → `safe` → `minimal`: after consecutive failed starts, an
-  instance automatically falls back to a known-good smaller configuration instead of
-  crash-looping.
-- **Optimizer.** Benchmarks candidate settings against agentic and coding workloads and
-  recommends the winner, with thermal and abort limits so a bad candidate can't cook the
-  card. Its models mode compares whole model files the same way. Given a workload mix, speed
-  is the time a typical request of that mix takes, measured at the depths it reaches.
-- **Workload profile and auto-fit.** Every real request is kept (llama-server wipes its log on
-  each restart) and profiled: context depth, output length, concurrency, the idle hours of the
-  week, real decode against the measured curve. Findings say where the settings do not fit
-  that workload, with the evidence. Auto-fit, off until you turn it on, measures changes in
-  idle windows, proposes them or applies speed-only wins by itself, and checks each change
-  against the next real requests, rolling back one that made them slower. See
-  [Workload and auto-fit](#workload-and-auto-fit).
-- **Decode-vs-depth curve.** Measures tokens/s at 8k, 32k, 128k, 240k… context on the
-  running model, with GPU temperatures sampled *during* each request — because one "t/s"
-  number lies about long-context agent sessions. The live decode chart then judges every
-  request against that curve at the request's own context depth.
-- **Fit: requants made for your cards.** Plans each tensor's format from the model's
-  full-precision source so it fits the VRAM your running setup actually leaves, on the
-  formats your cards measured fastest, with an explanation for every choice. Builds on the
-  CPU while the server keeps serving, then verifies each candidate against today's model
-  (coding and agent suites, decode curve, real VRAM). Also: importance matrices, projector /
-  sd.cpp / audio.cpp conversion, and a daily check for new upstream revisions.
-- **Refusal check (safety).** Measures how often the running model declines requests it
-  should decline and how often it wrongly refuses ordinary ones, using two public prompt
-  sets. A strict verdict counts only real first-person refusals; every verdict is listed
-  so you can check it. Nothing restarts: it sends one chat request at a time.
-- **Builds on tap.** Browse upstream releases of llama.cpp, sd.cpp, audio.cpp and Camelid, install
-  any flavour (Vulkan / ROCm / CUDA / CPU) in one click, choose which build each backend
-  uses, and optionally let a daily updater fetch new ones (it never restarts a running
-  server).
-- **Models.** Download from Hugging Face (token support, resumable, verified), see which
-  instance uses what, delete safely, extract and lint chat templates.
-- **GPU.** Per-card VRAM/GTT, per-process residency from DRM fdinfo, thermals, clocks, PCIe
-  link, `amdgpu_top`, and a **power cap** per card that survives reboots.
-- **GPU tuning.** Every card in detail, like GPU-Z: ids, VBIOS, DPM clock tables, sensors, the
-  OverDrive table. Core and memory clock limits and an undervolt (amdgpu OverDrive), power cap,
-  performance level and fan curve, through the power helper. A benchmark on your own model
-  measures what each change is worth in tokens/s and tokens per joule; **apply and test** puts
-  the old values back by itself when a change turns out unstable. VBIOS backup and a pre-flash
-  check of a ROM file. See [GPU Tuning](#gpu-tuning).
-- **Power options.** CPU governor and idle states, PCIe and NVMe power saving, GPU performance
-  level, fan curve and cap, the hardware watchdog and journal sync, in profiles; a boot profile
-  applied before the inference servers start, drift shown, every change logged; boots and how
-  they ended, per profile; PSU / UPS budget against the measured GPU peaks.
-- **MCP server.** The panel as Model Context Protocol tools, so an AI client (Claude Code,
-  Claude Desktop, any MCP client) can check status, read logs, compare settings, benchmark and
-  start or stop instances through the same guard rails as the UI. See [MCP server](#mcp-server).
-- **Access.** Single-user (one login, as a home box needs) or multi-user, chosen at setup: users
-  with roles (viewer, operator, admin), API keys, and a tamper-evident audit log of every change.
-  See [Access](#access-single-user-or-multi-user).
-- **One gateway.** An OpenAI-compatible `/v1` endpoint for every instance, with per-user quotas
-  and usage. See [Gateway and quotas](#gateway-and-quotas).
-- **Fleet.** Full LexiPanel on many boxes, one primary that sees them all and serves their shared
-  models through its gateway, with replicas and failover. See [Fleet](#fleet-many-boxes-one-primary).
-- **Crash forensics.** Boot history with clean-vs-hard-stop triage, the parameters that were
-  active at each crash, and a one-click debug bundle written for an AI assistant to read.
-- **Files.** A file manager for your home folder, with quick-jump buttons for uploads,
-  models & templates, image and audio models and outputs, logs, thermal logs, support
-  bundles, backups and launch scripts. Upload files or whole folders (buttons or drag & drop
-  from the desktop), download files or zips of folders and selections, new folder, rename,
-  delete, copy / cut / paste, drag rows onto folders to move, sortable columns, keyboard
-  shortcuts. Uploads stream to disk, so multi-GB GGUFs are fine. Guard rails: hidden system
-  folders (`.ssh`, `.config`, …) are unreachable, `panel/` is read-only, and a model,
-  projector, template or log that a server is using or a setting points at cannot be
-  deleted, moved or renamed.
-- **Terminal.** An in-browser terminal (ttyd) behind the same login and your Linux password.
+- **Independent instances.** Run multiple inference servers side by side, each with its own engine, devices, backend, parameters, port, logs, statistics and `systemd --user` unit (`LexiPanel-inst@<id>`). The original server remains available as the legacy `main` instance.
+
+- **Five engine families, one operator workflow.** llama.cpp for text/vision; stable-diffusion.cpp for images; audio.cpp for speech, music and audio tasks; Camelid for curated GGUF chat on CPU/NVIDIA; ONNX Runtime GenAI for CPU/GPU/NPU execution.
+
+- **220+ explained controls plus whatever the active build added yesterday.** Common settings live in grouped forms with plain-English help. For llama.cpp, *All build options* parses the active binary's `--help`, so a newly-added upstream flag does not require waiting for LexiPanel UI code before it is reachable.
+
+- **Launch-plan preview.** See the exact command and environment, warnings, refused conditions and estimated memory before starting anything.
+
+- **Memory planning.** Reads GGUF metadata for cache shape, uses observed process overhead, accounts for other servers already resident on the selected devices, exposes the host RAM budget and refuses launches that cannot fit safely.
+
+- **Fallback tiers.** `normal` → `safe` → `minimal` after failed starts so a bad configuration degrades toward a known-good one instead of crash-looping the host.
+
+- **Long-context measurement.** Measure decode at 8k, 32k, 128k, 240k or other depths with in-request thermals. Live traffic is compared against the measured curve at its own depth.
+
+- **Optimizer.** Benchmark candidate launch settings against coding/agent workloads with thermal and abort limits. Models mode compares entire model files. Workload-weighted runs score the time a *typical request* would take rather than treating every depth equally.
+
+- **Workload + auto-fit.** Keep real request evidence across restarts, learn idle windows, identify configuration/workload mismatches, measure alternatives, optionally apply narrowly-scoped speed wins and verify them on later real traffic.
+
+- **Hardware-fitted requants.** Measure formats on the actual cards, solve a tensor-level plan to a real VRAM budget, build it on CPU, verify it against the current model, keep importance matrices and portable recipes, and watch upstream revisions.
+
+- **Model-quality checks around optimization.** Task suites gate optimization/Fit comparisons. The refusal check separately measures expected refusals and over-refusals using public prompt sets, one ordinary chat request at a time.
+
+- **Engine builds.** Browse upstream releases, install Vulkan/ROCm/CUDA/CPU variants, choose active builds per backend and optionally let the daily updater fetch new releases without restarting a running service.
+
+- **Model management.** Resumable Hugging Face downloads with token support, instance references, protected deletion, chat-template extraction and linting.
+
+- **Built-in llama.cpp Web UI.** LexiPanel can expose/configure the web UI shipped by llama.cpp per instance instead of reinventing its chat surface.
+
+- **GPU visibility.** Per-card VRAM/GTT, process residency, thermals, clocks, PCIe state, `amdgpu_top`, power and power-cap history.
+
+- **GPU tuning.** Supported AMD cards expose accepted OverDrive ranges for core/memory limits and undervolt, plus cap/performance/fan controls, benchmark comparison, tokens/joule, profiles, VBIOS backup and a ROM pre-flash check. LexiPanel never flashes firmware.
+
+- **Power profiles.** CPU governor/idle policy, PCIe/NVMe power settings, GPU policy, fan/cap, watchdog and journal behavior can be grouped into audited profiles with a boot profile, drift detection, boot stability and PSU/UPS budgeting.
+
+- **OpenAI-compatible gateway.** One `/v1/models` and `/v1/chat/completions` front door for running llama.cpp, ONNX Runtime and Camelid instances. Streaming passes through. Per-user rate/token/concurrency/model quotas and usage accounting are built in.
+
+- **Access control.** Single-user mode for the home box, or multi-user mode with `viewer`, `operator` and `admin`, expiring API keys and a hash-chained audit log of mutating operations.
+
+- **Fleet.** Run full LexiPanel on multiple machines. Members report hardware, instance state/speed and proposals to a primary. Shared models can appear through the primary gateway; replicas can be selected by open-request load and an unresponsive replica is skipped. Member control remains local.
+
+- **MCP.** Expose the operator plane as tools to Claude Code, Claude Desktop, Hermes or any MCP client, using the same validation and access model as the UI/API.
+
+- **Hermes Agent readiness.** For llama.cpp instances, check the settings Hermes needs, including Jinja/tool templates, context and network reachability, then generate the relevant `model:` and `mcp_servers:` configuration blocks without writing the LLM key into the config.
+
+- **Crash forensics.** Boot history, clean-vs-hard-stop triage, settings active near a crash and a debug bundle designed to be readable by a human or AI assistant.
+
+- **Protected file manager.** Stream multi-GB uploads, move/copy/rename/delete/download, zip folders and selections, while refusing access to hidden system directories and protecting files currently referenced by a server or setting.
+
+- **Browser terminal.** ttyd behind the same front door, with a second Linux/PAM login before a shell exists.
+
+- **Graph Gauntlet.** Yes, the charts can turn into a browser runner game whose terrain is the actual graph data. It makes no network requests and stops when hidden. This feature is not part of the control plane; it is here because staring at telemetry for months apparently has consequences.
+
+---
 
 ## Tour of the tabs
 
 | Tab | What you get |
 |---|---|
-| **Status** | Every running server on the box (any engine), start/stop/restart, the instance switcher, throughput hero + live decode chart, decode-vs-depth curve, instance profiles. For image instances a **Generate** card and gallery; for audio instances a **Run** card with per-model options, audio players and recent outputs. For llama.cpp instances a **Hermes Agent** card: readiness checks and its `config.yaml`. |
-| **Parameters** | The grouped settings form with tooltips, backend picker, memory calculator, RAM budget, fallback tiers, model profiles, *All build options*. Image instances get model presets; audio instances get **Models on this instance** and the **Model catalog**. ONNX Runtime instances get the provider (CPU or NPU), its options and every generation option of the runtime. |
-| **Optimize** | Benchmark suites (agentic, coding), candidate sweeps, thermal/abort limits, recommended settings you can apply. A models mode compares whole model files the same way. |
-| **Workload** | The instance's real requests: per day, depth against what a conversation can hold, output length, decode percentiles, concurrency, draft acceptance, real vs measured curve; depth histogram, busy/idle heatmap of the week, findings; **Auto-fit** settings, proposals and the history of every experiment with its check on real traffic. |
-| **Fleet** | This box's role (standalone, primary, member). On the primary: every box online / stale / offline with its hardware, instances, speeds and proposals, join codes, revoke. On a member: the primary's address, join, *share this box's models*. |
-| **Access** | Single- or multi-user mode, users and roles, API keys (shown once, with expiry), and the audit log with its chain check. |
-| **Fit** | Hardware-fitted requants: readiness checklist, per-tensor planner that explains every choice, builds, a report card per candidate (verified on the suites, the depth curve and the VRAM it really uses), format speeds per card, importance matrix, projector / sd.cpp / audio.cpp conversion, upstream watch, **refusal check** (safety evaluation of the running model). |
-| **Models** | Everything on disk, size, which instance references it, safe delete. |
-| **Download** | Hugging Face downloads with progress; HF token storage. |
-| **Templates** | Chat templates on disk, extract from a GGUF, lint for tool-calling / reasoning features, pin to an instance. |
-| **GPU** | Devices, memory, per-process residency, thermals & power, clocks & link, VRAM-vs-GTT history, `amdgpu_top`, **Power cap**. |
-| **GPU Tuning** | Card details, clock / voltage / power / fan settings with the kernel's accepted ranges and boot defaults, benchmark with live power chart, results compared against a reference run, advice, VBIOS backup and ROM check. |
-| **Statistics** | Requests, tokens, decode/prefill medians and history, draft acceptance. |
-| **Diagnostics** | Pass/warn/fail checks with evidence and the fix, live command line, debug bundle, configuration backup. |
-| **Power options** | Equipment, every power setting (live, boot default, boot profile), profiles, drift, audit log, stability by profile, power budget & UPS. |
-| **Crashes** | Boot history, hard-stop triage, parameters in force at each crash. |
-| **Builds** | Engine catalogs, upstream releases, install/activate/delete, daily updater policy. |
-| **Logs** | Engine and launch logs, auto-following. |
-| **Files** | Home-folder manager with quick jumps (Uploads, Models & templates, Logs, Backups…): drag & drop upload of files and folders, download (folders and selections as zip), new folder, rename, delete, copy / cut / paste, drag-to-move, sort, filter, Ctrl+A/C/X/V, Delete, F2. In-use and referenced files are protected. |
-| **Terminal** | ttyd in the page (runs Claude Code in the original setup; a plain shell unit is included too). |
+| **Status** | All running servers, lifecycle controls, instance switcher, throughput/live decode, depth curve and profiles. Image/audio instances get task-specific run cards. llama.cpp instances get Hermes readiness/config. |
+| **Parameters** | Grouped settings with tooltips, backend/device selection, memory calculator, RAM budget, fallback tiers and model profiles. ONNX instances get provider + generation controls. |
+| **Optimize** | Coding/agent suites, candidate sweeps, model comparisons, workload-weighted runs, thermal/abort limits, apply/rollback. |
+| **Workload** | Real traffic depth, prompt/output size, concurrency, draft acceptance, busy/idle heatmap, findings and Auto-fit experiments/proposals/history. |
+| **Fleet** | Standalone/primary/member role; box health and reported hardware/instances on the primary; join/share controls on members. |
+| **Access** | Mode, users, roles, API keys and the tamper-evident audit tail/chain check. |
+| **Fit** | Source readiness, per-tensor planning, format speed measurements, builds, candidate report cards, importance matrices, portable recipes, conversion and refusal checks. |
+| **Models** | Local models, sizes, references and protected delete. |
+| **Download** | Hugging Face download queue/progress and token storage. |
+| **Templates** | Extract/lint/pin chat templates for tool use and reasoning behavior. |
+| **GPU** | Device memory/residency, thermals/power, clocks/link and cap. |
+| **GPU Tuning** | Hardware details, supported tuning controls, benchmark/live power, profiles, VBIOS backup and ROM checks. |
+| **Statistics** | Requests, tokens, decode/prefill history and draft acceptance. |
+| **Diagnostics** | Pass/warn/fail checks with evidence, live command line, debug bundle and configuration backup. |
+| **Power options** | Equipment, live/default/boot values, profiles, drift, audit log, boot stability and power budget/UPS. |
+| **Crashes** | Boot history, hard-stop triage and the parameters in force. |
+| **Builds** | Engine catalogs, releases, install/activate/delete and updater policy. |
+| **Logs** | Engine/launch logs with follow. |
+| **Files** | Protected home-folder manager with large streaming uploads, zip/download and keyboard operations. |
+| **Terminal** | ttyd terminal and optional plain shell service. |
+
+---
 
 ## Engines
 
-| Engine | Server | What for | Backends | Instance settings |
+| Engine | Server | Workloads | Compute | Configuration surface |
 |---|---|---|---|---|
-| **llama.cpp** | `llama-server` | Chat, coding agents, vision (mmproj), speculative decoding (draft model, embedded MTP, n-gram) | Vulkan, ROCm, CUDA, CPU; multi-GPU via Vulkan | 164 — context & KV cache, offload, RoPE/YaRN, throughput, speculative, sampling, reasoning, vision, Vulkan/ROCm env knobs, server |
-| **stable-diffusion.cpp** | `sd-server` | Text-to-image (Qwen-Image 2.1 preset included) | Vulkan, ROCm, CPU | 31 — model files, placement (diffusion / text encoder / VAE per device), offload, VAE tiling, generation defaults |
-| **audio.cpp** | `audiocpp_server` | TTS, voice cloning & design, speech-to-text, music & song generation, sound effects, stem separation, VAD, diarization — 80+ model families | Vulkan, CPU | 13 server settings **plus** per-model load / session / default-request options generated from the build's model specs |
-| **Camelid** | `camelid serve` | Chat with a curated, validated model list (Qwen3, Llama 3.x, Gemma 4, Mistral, DeepSeek R1 distills, BitNet…), its own web UI, OpenAI-compatible API | CPU, CUDA (NVIDIA). No Vulkan/ROCm, so AMD cards are refused. | 18 — model, threads, KV cache precision, thinking, speculative decoding (n-gram / draft), limits, API key, LAN mode |
-| **ONNX Runtime** | `onnx_server.py` (onnxruntime-genai) | Chat with ONNX models (the GenAI format: `genai_config.json` + `model.onnx`), OpenAI-compatible API with streaming. See [ONNX Runtime](#onnx-runtime-npus-amd-intel-qualcomm) | CPU; NPUs: AMD Ryzen AI (VitisAI), Intel (OpenVINO: NPU / GPU / CPU), Qualcomm (QNN); CUDA, DirectML, WebGPU | 32 — model, provider and its options, all 17 generation options the runtime reports (checked at every start), threads, server, API key |
+| **llama.cpp** | `llama-server` | Chat, coding/agents, vision, speculative decoding | Vulkan, ROCm, CUDA, CPU; multi-GPU through the supported llama.cpp path used by this setup | 164 first-class settings plus flags discovered from the active binary |
+| **stable-diffusion.cpp** | `sd-server` | Text-to-image and supported diffusion models | Vulkan, ROCm, CPU | Model placement, offload, VAE behavior, generation defaults and presets |
+| **audio.cpp** | `audiocpp_server` | TTS, cloning/design, STT, music/song, sound effects, separation, VAD, diarization | Vulkan, CPU | Server controls plus model-specific options generated from the installed build's specs |
+| **Camelid** | `camelid serve` | Curated GGUF chat/agent use | CPU, CUDA/NVIDIA | Model, threads, cache precision, thinking/speculation, limits, auth/LAN |
+| **ONNX Runtime GenAI** | `onnx_server.py` | OpenAI-compatible chat from ONNX GenAI models | CPU; AMD Ryzen AI/VitisAI; Intel OpenVINO NPU/GPU/CPU; Qualcomm QNN; CUDA; DML/WebGPU where the runtime supports them | Model/provider options plus generation options discovered/verified at start |
 
 ### audio.cpp at a glance
 
-- Pick models from a catalog of every family the installed build supports (Kokoro, Qwen3-TTS,
-  VoxCPM2, VibeVoice, Fish Audio, IndexTTS-2, Moonshine, Qwen3-ASR, Parakeet, ACE-Step,
-  Stable Audio 3, YuE2, HTDemucs, …), check download sizes, install with one click.
-- Each model's options appear as a form with upstream's own descriptions as tooltips —
-  weight precision, memory arenas, chunking, seeds, sampling, and so on.
-- The **Run** card adapts to the task: text + voice for TTS, a reference WAV (+ transcript)
-  for cloning, prompt + lyrics + length for music, an input WAV for transcription and
-  separation. Outputs are kept per instance with players and download links.
-- Residency controls so audio can share a card with an LLM: models kept loaded, unload after
-  idle, and a keep-free memory guard.
+The installed audio.cpp build supplies the catalog. LexiPanel turns supported model families into install/run forms instead of hard-coding one TTS engine. That can cover TTS, cloning, ASR, music, sound effects, separation and diarization depending on the upstream build.
 
-Example: Kokoro 82M on an 8-core CPU speaks at ~2.7× real time; Moonshine Tiny transcribes a
-6 s clip in ~60 ms.
+Residency controls let audio workloads share a machine with an LLM: maximum loaded models, idle unload and a keep-free memory guard.
+
+### ONNX Runtime and NPUs
+
+ONNX Runtime is how LexiPanel reaches devices llama.cpp does not target directly. An ONNX instance points at a GenAI model directory (`genai_config.json` + `model.onnx`) and a runtime Python/provider.
+
+The panel reports the installed runtime/provider set and NPUs visible to the kernel. Starts are refused for missing runtimes/models/providers, missing QNN libraries and unsafe LAN listeners without an API key. The Parameters surface exposes the **17 generation options** currently reported by onnxruntime-genai and verifies them by setting/reading them at start rather than assuming the installed runtime accepts them. Provider-specific options cover OpenVINO, QNN and VitisAI plus an escape hatch for additional provider JSON.
+
+CPU operation has been exercised in the source repository (the current README records Qwen2.5-0.5B-Instruct int4 on onnxruntime-genai 0.16 with all 17 options accepted/read back). AMD/Intel/Qualcomm NPU paths depend on the vendor runtime and real corresponding hardware, so treat a first run on those machines as hardware validation rather than a blanket compatibility guarantee.
+
+---
 
 ## Architecture
 
-```
- browser ──HTTPS──▶ Caddy :443 (basic auth, internal CA)
-                      ├─ /terminal/*  ──▶ ttyd :8091   (LexiPanel-ttyd)
-                      ├─ /shell/*     ──▶ ttyd :8092   (LexiPanel-shell, optional)
-                      └─ everything   ──▶ panel :8090  (LexiPanel-panel, 127.0.0.1 only)
-                                              │  JSON API + static/index.html
-                                              │
-          ┌───────────────────────────────────┼─────────────────────────────────┐
-          ▼                                   ▼                                 ▼
-  LexiPanel-llama.service                 LexiPanel-inst@<id>.service            (per instance)
-  run_llama_*.sh               instance_launch.py <id>
-  sources panel/params.env            reads instances/<id>/params.env
-          │                                   │  launch plan → argv + env
-          ▼                                   ▼
-     llama-server  :8081           llama-server | sd-server | audiocpp_server | camelid | onnx-server  :808x
+```text
+browser / API / MCP client
+          │
+          ▼
+      Caddy :443
+ TLS + front door
+          │
+          ├────────────▶ ttyd :8091 / :8092
+          │
+          ▼
+    panel :8090
+  (loopback only)
+          │
+          ├── JSON API / Access / audit
+          ├── OpenAI gateway / quotas
+          ├── MCP transport
+          ├── fleet reporting/routing
+          │
+          ├──────── legacy main ────────▶ LexiPanel-llama.service
+          │
+          └──────── instances ──────────▶ LexiPanel-inst@<id>.service
+                                           │
+                                           ▼
+                         llama-server / sd-server / audiocpp_server
+                              / camelid / onnx_server.py
 ```
 
-- `panel.py` is the whole backend (HTTP server, launch plans, estimators, crash triage).
-  Engine specifics live beside it: `sdcpp.py`, `audiocpp.py`, `engines.py` (build catalogs +
-  updater), `gpupower.py`, `optimizer.py` + `optimize_suite.py`, `depthcurve.py`,
-  `flagcatalog.py` + `flaghelp.py`, `workload.py` + `autofit.py`.
-- `instance_launch.py` executes **exactly** the plan the UI previewed. It keeps a
-  failed-start counter (which drives the fallback tiers), a host-RAM-floor watchdog that
-  kills the server before the host locks up, and archives each engine log.
-- State is plain files: `params.env`, JSON beside it, per-instance directories. Back it all
-  up with `make-backup.sh`.
+`panel.py` is the HTTP backend and orchestration center. Engine-specific modules live beside it. `instance_launch.py` executes the same launch plan the UI/API previewed, maintains failed-start state, archives logs and enforces the host-RAM watchdog.
+
+Persistent state is deliberately boring: `.env` files, JSON/JSONL and per-instance directories. `make-backup.sh` captures the hard-to-reproduce configuration without copying model weights.
+
+---
 
 ## Install
 
-Tested on Ubuntu 26.04 with Python 3.14 (stdlib only; `python3-jinja2` is optional and adds a
-parse check when saving chat templates), Caddy 2.x, ttyd, systemd.
+The tested path is Ubuntu 26.04 with a modern Python 3 (the project currently exercises Python 3.14), Caddy 2.x, ttyd and systemd. Python application code uses the standard library; `python3-jinja2` is optional for an extra template parse check. Individual inference engines keep their own native/runtime dependencies.
 
-**Guided:** `bash install-interactive.sh` walks through the steps below in order, asking before
-each one, with a time for each. Run `bash install-interactive.sh --check` first: it checks the
-account and paths and changes nothing. Re-running it later updates the code and keeps every
-settings file, instance and result. Its last, optional step installs the ONNX Runtime engine
-(`bash install-onnx.sh`, for ONNX models and NPUs; it offers it by default when it sees an NPU).
-The steps by hand:
+### Guided install
 
-1. **Put the files in place** as `/home/admin/panel` (and the launch scripts in
-   `/home/admin/llama`), owned by `admin`.
-2. **Install the front door** (Caddy + basic auth + panel and terminal units):
-   ```bash
-   bash install-panel-deps.sh   # or: sudo apt install caddy ttyd apache2-utils
-   bash install.sh              # asks for a panel username and password, writes /etc/caddy/Caddyfile
-   ```
-   It prints the URL. The certificate comes from Caddy's internal CA; import its root into
-   your browser to silence the warning (the script tells you where it is).
-3. **Make the main LLM start on boot** (optional; installs `LexiPanel-llama.service` and a sudoers
-   rule scoped to start/stop/restart that one unit):
-   ```bash
-   bash install-autostart.sh
-   ```
-4. **Let instances survive logout and start at boot:**
-   ```bash
-   sudo loginctl enable-linger admin
-   ```
-5. **Get an engine build:** Builds tab → *Show upstream releases* → Install → *Use for vulkan*
-   (or rocm / cuda / cpu).
-6. **Create an instance:** Status tab → *New instance* → pick engine, device(s), backend →
-   Create → set it up on the Parameters tab → Start.
+```bash
+bash install-interactive.sh --check   # inspect account/paths; change nothing
+bash install-interactive.sh           # guided install/update
+```
 
-Optional extras:
+Re-running the installer updates code while preserving instance/config/result state. The optional ONNX step can install the runtime environment; it is offered when an NPU is detected.
 
-| Want | Run once |
-|---|---|
-| GPU power cap from the panel | `echo 'ACTION=="add|change", SUBSYSTEM=="hwmon", ATTR{name}=="amdgpu", RUN+="/bin/sh -c '\''chgrp admin /sys%p/power1_cap && chmod g+w /sys%p/power1_cap'\''"' \| sudo tee /etc/udev/rules.d/99-LexiPanel-gpu-powercap.rules && sudo udevadm control --reload && sudo udevadm trigger --action=change --subsystem-match=hwmon` (the GPU tab shows this too) |
-| Changing settings in Power options and GPU Tuning | `sudo bash power/install-power.sh` (one root helper, one sudoers rule, a boot unit; changes nothing by itself) |
-| AMD fan curve, clock limits and undervolt (OverDrive) | copy `systemd/99-amdgpu-overdrive.cfg` to `/etc/default/grub.d/`, `sudo update-grub`, reboot |
-| LAN-only raw ports | `bash lockdown.sh` (ufw; edit the subnet first) |
-| eSpeak-ng for Kokoro/Piper/Kitten TTS | `sudo apt install libespeak-ng1 espeak-ng-data` |
-| ROCm runtime | `sudo apt install libamdhip64-7 librocblas5 libhipblas3` |
+### Manual outline
 
-## Configuration files
+1. Put the repository at `/home/admin/panel` and launch scripts at `/home/admin/llama`, or adapt the paths first.
+2. Install Caddy/ttyd and the panel units:
 
-| File | Written by | Read by | What |
-|---|---|---|---|
-| `params.env` | panel | `run_llama_*.sh` | Settings for the legacy `main` instance. **Overrides the launch script's defaults**, so the script and the running process legitimately disagree. |
-| `params-<backend>.env` | panel | panel | Per-backend copies; switching backend swaps them into `params.env`. |
-| `params-tier-{normal,safe,minimal}.env` | panel | launch script | Fallback tiers, chosen by the failed-start counter. |
-| `instances/<id>/instance.json` | panel | panel, launcher | Name, engine, device(s). |
-| `instances/<id>/params.env` | panel | `instance_launch.py` | That instance's settings. |
-| `instances/<id>/audio-models.json` | panel | launcher | audio.cpp: models served, task, per-model options. |
-| `builds.env` / `engine-builds.json` | panel | launch scripts / launcher | Which build each backend runs. |
-| `engine-updates.json` | panel | updater | Daily updater policy per engine (off by default). |
-| `gpu-power.json` | panel | panel | Saved power caps, re-applied at start and every 60 s. |
-| home folder | Files tab | you | The file manager's root. Set `LEXIPANEL_FILES_ROOT` in the panel's environment to use another one. |
-| `profiles/`, `curves/`, `optimize/` | panel | panel | Model profiles, depth curves, optimizer runs. |
-| `power-state/` | panel | panel | Power options: saved profiles, settings, the audit log of every change (GPU Tuning changes included). |
-| `gpu-tune/`, `gpu-bios/` | panel | panel | GPU Tuning benchmark results; VBIOS backups (`.rom` + what was read from it). |
-| `workload/<id>/` | panel | panel | Workload profile: every completed request (`requests.jsonl`, 60 days), hourly slot activity (`activity.jsonl`), configurations seen, auto-fit settings and experiments (`autofit.json`). |
+```bash
+bash install-panel-deps.sh
+bash install.sh
+```
 
-Examples of `params.env` and a tier file are in [`examples/`](examples/).
+3. Optional legacy `main` autostart:
+
+```bash
+bash install-autostart.sh
+```
+
+4. Allow user instances to survive logout:
+
+```bash
+sudo loginctl enable-linger admin
+```
+
+5. In **Builds**, install/activate an engine build for the backend you intend to use.
+6. In **Status**, create an instance, choose engine/devices/backend, configure it under **Parameters**, inspect the launch plan and start it.
+
+### Optional host features
+
+- `sudo bash power/install-power.sh` installs the narrow root helper used by Power options/GPU Tuning. It changes no tuning value merely by being installed.
+- AMD OverDrive clock/voltage controls require the included GRUB snippet and a reboot.
+- `bash lockdown.sh` can restrict raw instance ports to a LAN subnet.
+- audio.cpp families may need system libraries such as eSpeak NG.
+- ROCm/CUDA/provider runtimes remain engine/vendor dependencies.
+- `bash install-onnx.sh` creates the ONNX Runtime GenAI environment; provider-specific variants are available for supported runtimes.
+
+---
 
 ## Parameters
 
-The complete reference — every key, its default, flag, allowed values and the full tooltip
-text — is **[PARAMETERS.md](PARAMETERS.md)** (generated from the code, so it can't drift).
+The common llama.cpp surface contains controls for backend/offload, context/KV cache, RoPE/YaRN, batching/threads, speculative decoding, Vulkan/ROCm behavior, vision, reasoning, sampling, server settings and the host RAM floor.
 
-Highlights of the llama.cpp groups:
+The complete generated reference is **[PARAMETERS.md](PARAMETERS.md)**.
 
-| Group | Settings | Examples |
-|---|---|---|
-| Backend | 1 | `BACKEND` vulkan / rocm / cuda / cpu |
-| Offload | 9 | `OVERRIDE_TENSORS`, `N_CPU_MOE`, `SPLIT_MODE`, `TENSOR_SPLIT`, `MMPROJ_DEVICE` |
-| Context & memory | 18 | `CTX`, `KV_TYPE`, `CACHE_RAM`, `CACHE_REUSE`, `CTX_CHECKPOINTS` |
-| Long context (RoPE) | 9 | `ROPE_SCALING`, `YARN_ORIG_CTX`, `YARN_EXT_FACTOR` |
-| Throughput | 11 | `NGL`, `BATCH`, `UBATCH`, `THREADS`, `FLASH_ATTN`, `PARALLEL` |
-| Speculative decoding | 9 | `SPEC_TYPE` (`draft-mtp`, draft model, n-gram), `SPEC_N_MAX`, `SPEC_P_MIN` |
-| Speculative (n-gram) | 12 | n-gram mod / simple / map-k tuning |
-| ROCm (HIP) | 9 | `HSA_ENABLE_SDMA`, `GGML_CUDA_*` graph / pinned-memory switches |
-| Vulkan (RADV) | 32 | `GGML_VK_DISABLE_COOPMAT`, `GGML_VK_FORCE_MAX_ALLOCATION_SIZE`, … |
-| Vision | 6 | `USE_MMPROJ`, `MMPROJ`, `IMAGE_MIN_TOKENS`, `IMAGE_MAX_TOKENS` |
-| Generation | 1 | `N_PREDICT` |
-| Reasoning | 8 | `REASONING`, `REASONING_EFFORT`, `REASONING_BUDGET`, `PRESERVE_THINKING` |
-| Sampling | 25 | `TEMP`, `TOP_P`, `TOP_K`, `MIN_P`, DRY, XTC, mirostat, dynatemp |
-| Safety | 1 | `RAM_FLOOR_MB` — the launcher's host-RAM kill switch |
-| Server | 13 | `PORT`, `HOST`, `API_KEY`, `ALIAS`, `TIMEOUT`, `WEBUI` |
+The important distinction is that parameters are not simply saved and trusted. Before launch, LexiPanel constructs the concrete plan and exposes:
 
-audio.cpp server settings: `BACKEND`, `AC_THREADS`, `AC_MAX_LOADED`, `AC_IDLE_UNLOAD_S`,
-`AC_MIN_FREE_MB`, `AC_LAZY`, `RAM_FLOOR_MB`, `AC_BUSY_TIMEOUT_S`, `AC_UI`, `AC_LOG`, `PORT`,
-`HOST`, `AC_EXTRA` — plus each model's own options.
+- binary/build selected;
+- exact argv;
+- environment variables;
+- devices/backends;
+- estimated VRAM/RAM;
+- warnings about slow/unsafe choices;
+- hard refusal reasons.
 
-## HTTP API
+`instance_launch.py` then runs that plan instead of rebuilding a second interpretation elsewhere.
 
-The UI is a thin layer over a JSON API on `127.0.0.1:8090`; everything the UI does, a script
-can do. Add `?inst=<id>` to target an instance. See **[API.md](API.md)** for all 173 routes
-and curl examples. The same API is offered to AI clients as tools: [MCP server](#mcp-server).
-
-```bash
-curl -s http://127.0.0.1:8090/api/servers | jq                       # what is running
-curl -s 'http://127.0.0.1:8090/api/launch-plan?inst=coder' | jq .argv # what a start would run
-```
-
-## Safety rails (learned the hard way)
-
-These are enforced in code; each one exists because the box went down without it.
-
-- **No full-size draft model.** `--spec-draft-model` pointed at the target model loads a
-  second full copy and hard-locked the host twice. Embedded MTP uses
-  `--spec-type draft-mtp` with no draft model; the panel refuses the full-size case.
-- **`GGML_VK_ALLOW_SYSMEM_FALLBACK=0` always.** Without it a Vulkan allocation that doesn't
-  fit silently lands in host RAM and the model runs at ~1/20th speed with no error. Every
-  launch plan sets it; Diagnostics checks it on the live process.
-- **Never the iGPU.** Vulkan instances are pinned by ICD; the Intel iGPU is refused as a
-  device. audio.cpp CPU instances hide every Vulkan ICD.
-- **Host RAM floor.** The launcher kills a server before `MemAvailable` drops below the
-  floor, and the RAM budget refuses starts that can't fit alongside what's already running.
-- **Fallback tiers** stop crash loops: one failed start → `safe`, two or more → `minimal`; a start that stays up resets the counter.
-- **Exit 78 = refused plan.** systemd doesn't retry a configuration error.
-- **Start guard for `main`.** Its unit allows 3 starts per 10 minutes (a crash-loop guard), and a
-  restart while the model is still loading kills it and counts as a failed start. The panel shows
-  starts used, loading state and the next fallback tier on the Server card; a refused start or
-  Save-and-restart opens a popup with the reason, when the lockout clears and how to clear it now
-  (a **Clear lockout** button once the sudoers rule includes `reset-failed`). Refusals are logged as
-  `[start-guard]` in the panel journal and summarised in Diagnostics → `start_guard`.
-- **Caddy has no admin API** here (`admin off`): `systemctl reload caddy` always fails, use
-  `restart`.
-- **The power cap is an average (PPT) limit.** It lowers sustained draw and heat; it does
-  not clip sub-second spikes, so it is not a fix for PSU/UPS trips.
-- **GPU tuning is live only, and tested.** Clock, voltage and fan changes made on the GPU
-  Tuning tab vanish at the next reboot unless you put them in a boot profile yourself, so an
-  unstable setting is undone by restarting. Apply-and-test puts the previous values back when
-  the run fails, the server dies, the kernel logs a GPU reset or a thermal limit trips. The
-  voltage offset is undervolt only. Benchmarks never overlap an optimizer or depth-curve run.
-- **No firmware writes.** The VBIOS backup only reads; the ROM check compares a file with the
-  card and ends with the vendor tool's command for you to run. (`flashrom -p internal`, which an
-  early attempt at this feature used, programs the *motherboard's* flash chip, not the GPU's.)
-
-## Security
-
-- **Cross-site protection.** Browsers resend basic-auth credentials to requests started by
-  *any* website, so the API refuses requests a browser marks as cross-site, a foreign
-  `Origin`, and form / `text/plain` POSTs (see [API.md](API.md)). The terminal units run
-  ttyd with `-O` so a foreign page cannot open the terminal websocket either.
-- **Settings files are written single-quoted.** `params.env`, the tier files and
-  `builds.env` are sourced by bash; values are stored literally, so `$(...)`, backticks and
-  quotes in a setting are data, never code. Newlines are refused.
-- The panel binds **127.0.0.1** only. Caddy in front provides TLS and basic auth. Both
-  Caddyfiles here ship with `$2a$14$REPLACE_ME`; `install.sh` fills in your hash.
-- **llama-server, sd-server and audiocpp_server have no authentication.** Keep instances on
-  `127.0.0.1` unless you mean it; a `0.0.0.0` bind is flagged as a warning. `lockdown.sh`
-  restricts the raw ports to your LAN with ufw. llama.cpp's `API_KEY` setting is available.
-- **The terminal asks you to sign in.** ttyd starts `su -l admin`, so every terminal session
-  (including a page refresh) asks for the Linux account password, checked by PAM, before
-  any shell exists. That is on top of the panel login. Traffic is TLS end to end from the
-  browser to Caddy (HTTP redirects to HTTPS); Caddy to ttyd is loopback only. Import Caddy's
-  root certificate in your browser so you can tell the real box from an impostor. Remove the
-  `/terminal` route from the Caddyfile if you don't want a web terminal at all.
-- The sudoers rules are scoped: start/stop/restart of `LexiPanel-llama`, and the power
-  helper's five verbs (`status`, `apply`, `persist`, `unpersist`, `vbios`). The helper checks
-  every target against devices it found itself and every value against that device's own range.
-- **MCP.** `/api/mcp` sits behind the same Caddy login and cross-site protection as the rest of
-  the API. Every tool is a documented route, so an AI client can do only what the UI can; there
-  is no file-write tool, and `LEXIPANEL_MCP_READONLY=1` hides every tool that changes anything.
-
-## Adapting it to your box
-
-This is one machine's panel, generalised only as far as renaming the user:
-
-- **User and paths:** `admin`, `/home/admin/{panel,llama,models,sdcpp,audiocpp}`. To use
-  another user: change `HOME` at the top of `panel.py`, the `User=`/paths in `systemd/*`,
-  the sudoers file, and the launch scripts (`grep -rn /home/admin`).
-- **Legacy `main` instance:** launched by `launch-scripts/run_llama_vulkan.sh`
-  (also `_rocm`, `_cpu`), written for one Qwen 27B model with embedded MTP. Point `MODEL`
-  at yours in `params.env`, or ignore `main` and use instances only.
-- **Hardware assumptions:** AMD first (amdgpu sysfs for VRAM, thermals, power, OverDrive);
-  NVIDIA supported via `nvidia-smi` and Mesa NVK; tooltips quote measurements from a
-  7900 XTX. Multi-GPU is Vulkan-only.
-- **Ports:** panel 8090, terminals 8091/8092, main LLM 8081, telemetry 8082, instances from
-  8083 up.
+---
 
 ## Workload and auto-fit
 
-The Optimize tab answers "which settings win on the benchmark?". The **Workload** tab answers
-"what do this instance's real requests look like, and do the settings fit them?", and
-**auto-fit** keeps asking as the workload changes. llama.cpp instances only.
+The optimizer asks **“what wins on a benchmark?”**. Workload asks **“what are people/agents actually doing to this instance?”**. Auto-fit connects the two.
 
-**The profile** (`workload.py`, always on, nothing new is polled):
+For llama.cpp instances the profile records completed requests from the engine logs and preserves them across server restarts for **60 days**. It also aggregates already-existing slot telemetry into hourly activity and concurrency. LexiPanel's own optimizer, depth-curve, GPU-benchmark, refusal-check and Fit traffic is tagged out so the measuring does not teach the workload profile to measure itself.
 
-- Every completed request is read from the engine log every 30 s into
-  `workload/<id>/requests.jsonl`: new prompt tokens, output tokens, decode and prefill rate,
-  draft acceptance, the context depth it ran at, and a fingerprint of the configuration that
-  served it (the running argv, less port and log file). llama-server truncates its log on every
-  restart; the store keeps 60 days. On first start the archived engine logs are read once for a
-  head start.
-- The status sampler's `/slots` polls (every 2 s, already running) are summed per hour: how much
-  of the hour a request was in flight, and how many slots were busy at once.
-- LexiPanel's own measuring (optimizer, depth curve, GPU benchmark, refusal check, Fit) stays out
-  of both: requests completed while it runs are tagged and left out, and its own in-flight
-  requests do not count as busy. An experiment at 3 am must not teach it that 3 am is busy.
-- On the tab: requests per day; depth p50 / p90 / deepest against what one conversation can
-  hold; output length; decode percentiles; the most slots busy at once; draft acceptance; real
-  decode against the measured depth curve. A depth histogram with each band's share of
-  generated tokens (where decoding time goes). A heatmap of the 168 hours of the week, local
-  time, with the learned idle windows marked; a table view has every value.
+Useful findings include:
 
-**Findings** need 50 requests over 3 days, and each quotes its evidence:
+| Evidence | What it can imply |
+|---|---|
+| Deepest conversations never use much of reserved context | Measure a smaller `CTX` and quantify the cache capacity recovered |
+| Several requests repeatedly reach the limit | Measure a larger context if the estimator says it fits |
+| Multiple parallel slots are configured but never used | Compare against `PARALLEL=1` |
+| All slots spend meaningful time busy | Report a capacity pressure condition rather than blindly shrinking concurrency |
+| Draft acceptance is consistently poor | Measure speculation-off against current behavior |
+| Real decode falls well below the depth curve | Look for throttling, contention, build/config drift or other environmental change |
+| Post-change real traffic is slower/faster at matched depths | Confirm or roll back the change |
 
-| Finding | When | What auto-fit can measure |
-|---|---|---|
-| Context reserved but never reached | the deepest request is at most half of a conversation's context | `CTX` = deepest + 25 %, rounded up to 16k, with the KV cache it frees |
-| Sessions reach the context limit | 3 or more requests at 95 % of it | `CTX` + 16k per slot, if the estimator says it fits |
-| Parallel slots never used | `PARALLEL` > 1, never more than one busy in 7 days of watching | `PARALLEL=1` |
-| Every slot busy at peak times | several slots, all busy 30+ minutes a day | reported, not tried |
-| Speculative decoding may not pay | median draft acceptance under 0.45 over 50+ requests | `SPEC_TYPE=none` |
-| Real requests run below the measured curve | the last 3 days under 85 % of the curve at the same depths | the usual causes: throttling, another process on the card, a new build |
-| The last configuration change made requests slower / paid off | 20+ requests matched by depth, under 93 % / at least 103 % of before | |
+Auto-fit starts only under its configured safety conditions: instance healthy, no competing measurement/restart, quiet period satisfied, an allowed idle window with enough time left, no unverified previous change and weekly experiment limits.
 
-**Auto-fit** (`autofit.py`, **off** by default, per instance). An experiment is an ordinary
-optimizer run given the real workload: its depth mix (three bands, weighted by generated
-tokens), its typical new prompt and output length, and its p90 depth. Every candidate's decode
-is measured at those depths, and speed is the time a typical request of yours takes: its prompt
-at the measured prefill rate plus its output at the decode rate over the mix. A knob that is
-faster at depth 0 but slower where your sessions run does not win.
+A real request arriving interrupts the experiment and returns the instance to its saved settings after that request. Capacity-changing decisions such as context/parallelism remain proposals. Automatic application is restricted to an allowlist of speed-oriented keys (`UBATCH`, `BATCH`, `CACHE_REUSE`, `SPEC_N_MAX`, `SPEC_P_MIN`, `THREADS`) and requires at least the configured **3%** typical-request gain plus non-regressed task quality. Changes to capacity or behavior such as context, slot count, or speculation on/off remain proposals.
 
-- **tune**: the launch speed knobs (`UBATCH`, `BATCH`, speculative draft length and threshold,
-  cache reuse, threads), the quick budget's neighbours of the current values. Due when the running
-  configuration was never tuned for this workload, after 30 days, or when the p90 depth moves by
-  half (8k at least).
-- **reshape**: the findings' candidates (context size, slots, speculation on or off), each
-  measured as an alternative to the current settings. One whose point is capacity (context
-  freed or gained, one conversation given the whole context) is proposed when it is no slower
-  (97 % of the current speed or better) at the same quality; turning speculation off only when
-  it is the margin faster.
+After application, later real requests are compared with up to 14 days of pre-change traffic at matched depth bands. At **20 matched requests**, under **93%** of prior matched-depth decode is a regression: auto mode rolls it back and will not auto-apply that change again on that configuration. Too little traffic after seven days is inconclusive. A rollback leaves alone settings changed by hand since the experiment.
 
-An experiment starts only when auto-fit is on, the instance is running, nothing else is
-measuring or restarting, no request came in for 15 minutes (`quiet_min`), now is inside an idle
-window with an hour of it left, no earlier change is still being verified, and fewer than 2
-(`max_per_week`) ran in the last 7 days. The idle window is learned (an hour of the week
-watched at least 1.5 hours over two weeks and under 2 % busy) or set (`02-06`, local time). A
-real request arriving stops the experiment: the optimizer lets that request finish on the trial
-configuration, then restarts on the saved settings, restored byte for byte. So does running past
-120 minutes (`max_minutes`). **Tune now** and **Measure the findings now** run one by hand,
-skipping only the window, quiet and weekly checks.
+Run the included stand-in end-to-end test to watch the logic without a GPU or your real configuration:
 
-What happens to a winner:
+```bash
+bash tests/e2e/run.sh confirm
+```
 
-- **propose** mode: it becomes a proposal with **Apply**, **Apply and restart** and **Dismiss**.
-- **auto** mode: applied by itself only when it changes speed knobs only (`UBATCH`, `BATCH`,
-  `CACHE_REUSE`, `SPEC_N_MAX`, `SPEC_P_MIN`, `THREADS`), a typical request is at least 3 %
-  (`min_gain`) faster, quality on the task suite is no lower, and it was never rolled back on
-  this configuration. Anything that changes what the server can do (context, slots,
-  speculation on or off) is always a proposal. The restart onto the new settings waits for two
-  quiet minutes.
-- **Verified on real traffic**, whoever applied it: once the server runs the new configuration,
-  its real requests are compared with the 14 days before at the same depths (the median decode of
-  each depth band, weighted by where the new requests land). At 20 matched requests, under 93 %
-  of before is *regressed*: auto mode rolls it back and restarts, and never auto-applies that
-  change on that configuration again; propose mode reports it with a **Roll back** button.
-  Otherwise *confirmed*. Too little traffic in 7 days is *inconclusive*. A rollback leaves alone
-  any setting you changed by hand since.
+---
 
-It never swaps the model, never touches GPU clocks, voltage or power, runs one experiment at a
-time, and never runs through real traffic. The limits worth knowing: quality is LexiPanel's
-task suite, not your prompts; learned idle windows assume a weekly rhythm; the depth of a
-request is the context it released at (history + new prompt + output). Over MCP:
-`get_workload` and `apply_workload_proposal`.
+## Fit: hardware-fitted requants
 
-To watch the loop work without touching anything, `bash tests/e2e/run.sh confirm` (or
-`regress`, `interrupt`) runs it on a temporary copy of the panel's code against a stand-in
-llama-server, in about three minutes; `HOLD=120` keeps the copy's UI up at
-`http://127.0.0.1:18290/` at the end. It uses no GPU and none of your settings.
+Fit treats quantization as a constraint/measurement problem rather than a filename choice.
+
+1. **Source** — pin/download a revision, hash it and convert to a full-precision/BF16 GGUF source.
+2. **Measure formats** — create representative quant test files and benchmark them on the actual cards.
+3. **Plan** — derive a byte budget from a configuration already known to fit; combine measured format speed with tensor-role sensitivity and component-specific handling.
+4. **Dry-run** — ask the quantizer for the exact predicted output size and confirm that overrides land where intended.
+5. **Build** — quantize at low CPU priority so the serving stack can remain useful.
+6. **Verify** — compare candidate models with task suites, depth curves and observed VRAM.
+7. **Parts/recipes** — handle output/embedding/MTP components, importance matrices and portable/explainable recipes; convert supported projectors/sd.cpp/audio.cpp artifacts.
+8. **Watch upstream** — report source/quantizer revision changes without silently replacing a production model.
+
+Quality planning is explicit about its evidence. Where empirical KL data is not available, the planner uses priors and says so rather than presenting an estimate as measured truth.
+
+See **[fit/README.md](fit/README.md)** and **[fit/FINDINGS.md](fit/FINDINGS.md)**.
+
+---
 
 ## GPU Tuning
 
-One tab for the question "what is this card worth on my model, and what does a change buy?".
+The GPU Tuning tab answers a deliberately narrow question:
 
-- **Card**: PCI ids, board, VBIOS version, VRAM size and vendor, PCIe link now and max, DPM clock
-  tables with the current level, edge / junction / memory temperatures against their limits,
-  fan, board power against its cap, core voltage, performance level, power profile, and the
-  OverDrive table with the range the kernel accepts. Plain sysfs; nvidia-smi for NVIDIA.
-- **Settings**: max core clock, max memory clock and core voltage offset (amdgpu OverDrive,
-  RDNA2 and RDNA3), power cap, performance level, fan curve. Each row shows the live value, this
-  boot's default and the accepted range. They are the power helper's knobs, so the helper
-  validates, writes, reads back and logs them (Power options audit), and they can go in a Power
-  options boot profile once proven. Needs the helper; clocks and voltage need OverDrive
-  (Install, optional extras).
-- **Benchmark**: one fixed llama.cpp request (default 2048 prompt tokens + 256 generated, 5 runs)
-  on a running instance of the card, with power, clocks, temperatures and load sampled every
-  second. Decode t/s and its spread between runs, cold prefill, mean and peak power, tokens per
-  joule, peak junction and memory, and GPU resets from the kernel log. Every result keeps the
-  settings it ran with and is compared against a reference run (the oldest stable one unless
-  you pick one).
-- **Apply and test**: apply the settings, run the benchmark, and put the previous values back
-  if anything fails. The change stays only if the run was stable.
-- **Profiles**: save the current fan / voltage / clock set as a named profile, test it with the
-  benchmark, and set the winner to apply at every boot (stored with the Power options profiles,
-  applied before the inference servers start). This is how a proven overclock or undervolt is
-  made to survive a reboot; a change made without saving it to a boot profile is gone at restart.
-- **Advice**: power-limited, thermally limited, not GPU-bound, noisy runs, fastest and most
-  efficient run so far; each line quotes the number it is based on.
-- **VBIOS**: back up the card's image (read through the helper; amdgpu's debugfs copy or the PCI
-  ROM), and check a ROM file before flashing it: signature, vendor and device id against the
-  card, size, UEFI image, board part number, and whether it differs from the backup. LexiPanel
-  prints the vendor tool's command (`amdvbflash`, `nvflash`) and never runs it.
+> **What is this card worth on this model, and what did this change buy?**
 
-LLM decode reads every weight for each token, so it is bound by memory bandwidth
-([fit/FINDINGS.md](fit/FINDINGS.md)): memory clock tends to move tokens/s, core clock mostly
-moves watts. An undervolt usually buys efficiency. The benchmark is there so you don't have to
-take either on faith.
+It exposes card identity/VBIOS/link state, DPM tables, sensors and accepted tuning ranges. A benchmark drives the *running model* while sampling power, clocks, temperatures and load.
+
+Results include decode, cold prefill, run-to-run spread, power, peak thermals and **tokens per joule**. Results keep the settings that produced them and can be compared against a reference.
+
+On supported AMD hardware, **Apply and test** changes values, runs the benchmark and restores the prior values if the run fails, the model server dies, a reset is seen or a thermal limit trips. Proven profiles can later become the boot profile applied before inference services start.
+
+VBIOS support is intentionally read/check-only: back up the image, inspect a candidate ROM and print the vendor utility command. LexiPanel does **not** flash firmware.
+
+---
+
+## Gateway and quotas
+
+The panel exposes one OpenAI-compatible front door for the supported chat engines:
+
+```text
+GET  /v1/models
+POST /v1/chat/completions
+```
+
+A requested `model` resolves to an instance id/alias/model name. Streaming is passed through.
+
+In multi-user mode the caller uses a LexiPanel API key while per-instance credentials stay behind the gateway. Admins can configure per-user requests/minute, tokens/day, concurrency and allowed models. Usage is counted per day/user/model; prompt/reply contents are not stored by gateway accounting.
+
+Fleet members can optionally share eligible running models to the primary. Multiple copies of the same model can act as replicas; requests prefer the replica with fewer open requests and an unresponsive replica is temporarily skipped.
+
+This is intentionally a local/small-fleet gateway, not a claim to replace mature cloud-provider routing stacks.
+
+---
+
+## Access: single-user or multi-user
+
+**Single-user** is the default home-box mode: Caddy's login protects the panel and the app trusts traffic that reaches it.
+
+**Multi-user** makes the panel authenticate every request itself, including loopback clients:
+
+| Role | Intended access |
+|---|---|
+| **viewer** | Read-only operational state |
+| **operator** | Viewer + lifecycle and measurement operations such as start/stop/restart, benchmark/optimizer/depth/auto-fit experiments |
+| **admin** | Configuration, access, files, builds, fleet, power/GPU tuning and other mutations |
+
+Passwords are stored through the project's password-hashing path; API keys are shown once, expire and cannot exceed their user's role. MCP calls inherit the caller's role.
+
+Mutating actions enter a hash-chained audit log. Tests include access-control tripwires so adding a route without classifying it cannot silently turn it into viewer access.
+
+---
+
+## Fleet: many boxes, one primary
+
+Each box runs a full LexiPanel. One can be **primary** and others **members**.
+
+A member joins with a short-lived one-time code and receives its own token. It reports outward to the primary roughly once per minute. Reports contain machine/instance operational metadata such as GPUs/NPUs/RAM, engine/model/state/speed, workload counts, pending Auto-fit proposals and LexiPanel version — not prompts, instance secrets or API keys.
+
+The primary marks boxes online/stale/offline and can revoke a member. Normal control remains on each member's own panel; the fleet layer is not pretending to be a distributed shell.
+
+The shared-model gateway adds a useful middle ground before full distributed inference: one client endpoint can see models resident across several boxes and use simple replica failover/load selection.
+
+See **[docs/FLEET.md](docs/FLEET.md)** for the design and future work such as llama.cpp RPC striping.
+
+---
 
 ## MCP server
 
-`mcp_server.py` offers the panel to AI clients as [Model Context Protocol](https://modelcontextprotocol.io)
-tools: 28 of them (instances, status, parameters with a memory estimate before saving, launch
-plans, models, GPU and GPU Tuning, benchmarks, depth curves, optimizer status, the workload
-profile and auto-fit proposals, statistics, diagnostics, crashes, logs, power options, and
-reading text files from the home folder). Each
-tool is a call to a documented route, so the panel's own checks apply; a refused start comes
-back with the reason. Stdlib only.
+`mcp_server.py` exposes the panel as Model Context Protocol tools through stdio or Streamable HTTP.
 
 ```bash
-# stdio, for clients that start a command; run on the box, or through ssh
+# stdio over SSH
 claude mcp add lexipanel -- ssh admin@box python3 /home/admin/panel/mcp_server.py
 
-# Streamable HTTP, through Caddy with the panel login
+# HTTP through the panel front door
 claude mcp add --transport http lexipanel https://box/api/mcp \
-    --header "Authorization: Basic $(printf 'admin:PASSWORD' | base64)"
+  --header "Authorization: Basic $(printf 'admin:PASSWORD' | base64)"
 ```
 
-`LEXIPANEL_MCP_READONLY=1` (in the panel's environment, or the stdio server's) leaves only the
-tools that read. For a script, `GET /api/mcp/tools` and `POST /api/mcp/call {"name","arguments"}`
-are the same tools as plain JSON. `python3 mcp_server.py --help` lists the environment
-variables for reaching the panel through Caddy from another machine.
+`LEXIPANEL_MCP_READONLY=1` strips mutating tools. Multi-user API keys can be used instead of the single-user front-door credential where configured.
+
+The tool surface is deliberately operational: **28 MCP tools** covering status, instances, parameters and memory estimates, launch plans, models, GPU/power, benchmarks, curves, optimizer/workload/Auto-fit state, diagnostics, crash/log information and controlled text-file reads.
 
 ### Hermes Agent
 
-[Hermes Agent](https://hermes-agent.nousresearch.com/) (Nous Research) can use a llama.cpp
-instance as its model and these MCP tools as its hands. The **Hermes Agent** card on the Status
-tab checks what Hermes needs of the instance: started with `--jinja` (LexiPanel always passes it;
-without it llama-server ignores Hermes' tools), at least 64,000 tokens per conversation (`CTX` /
-`PARALLEL`), a chat template that handles tools, and an address Hermes can reach (`HOST=0.0.0.0`
-if it runs on another machine). It then writes the `model:` and `mcp_servers:` blocks for
-`~/.hermes/config.yaml`, pointed at this instance, with the MCP tools read-only
-(`LEXIPANEL_MCP_READONLY=1`) until you remove that line. An API key, if the instance has one, is
-referenced as `${env:LEXIPANEL_LLM_KEY}`, never written out. `GET /api/hermes` returns the same.
+For [Hermes Agent](https://hermes-agent.nousresearch.com/), LexiPanel checks a llama.cpp instance for Jinja/tool-template readiness, usable context per conversation and network reachability, then emits the relevant `model:` and `mcp_servers:` config fragments.
+
+The generated MCP config starts read-only. An LLM server API key is referenced through an environment variable rather than written as a literal secret.
+
+---
 
 ## GG: Graph Gauntlet
 
 Every chart card has a **▶ GG** button. It swaps the chart for a small runner game whose first
 stretch of track **is that chart's data**: the decode rate, the VRAM line, the depth curve.
+
 - **Drag to draw straight lines:** bridges over gaps, ramps to jump spikes and reach pickups,
   roofs to catch the archers' arrows.
 - **Lines are limited.** Each comes back once it's 20 m behind you. **+ LINE** and
   **+ LENGTH** pickups give you more.
 - Keys: P pauses, R restarts, Esc goes back to the graph.
-
 - **Beat your own numbers.** The game-over screen shows this run against your personal bests
   (metres, archers passed, arrows blocked and dodged, archers tackled, pickups) and marks each
   **NEW BEST**, with this session's runs and metres. **15 achievements**, from *First steps*
@@ -616,200 +537,270 @@ stretch of track **is that chart's data**: the decode rate, the VRAM line, the d
 
 It costs nothing when you're not playing: the loop stops when paused, closed, on another tab,
 or in a hidden browser tab. It makes no network requests and uses no libraries, running in your
-browser, not on the GPU box. Your record, bests and achievements are kept in the browser. Sources, the installer
-and tests are in [`gg/`](gg/). [`gg/GG-AI-GUIDE.md`](gg/GG-AI-GUIDE.md) explains how to rebuild or
-extend it without breaking the panel.
+browser, not on the GPU box. Your record, bests and achievements are kept in the browser. Sources,
+the installer and tests are in [`gg/`](gg/). [`gg/GG-AI-GUIDE.md`](gg/GG-AI-GUIDE.md) explains
+how to rebuild or extend it without breaking the panel.
 
-## Fit: hardware-fitted requants
+---
 
-Take a model's full-precision source and choose each tensor's format so it fits **your**
-cards at the context and speed you need, without losing agentic or coding quality, using the
-formats those cards actually run fastest. The **Fit** tab does it in steps:
+## HTTP API
 
-1. **Source** (phase A, `fit/phaseA-source.sh`): download a pinned revision, check every
-   file's SHA-256, convert to a BF16 GGUF.
-2. **Measure formats** (phase B): one test file per format, llama-bench on each card of an
-   instance, folded into a per-card speed model (decode time = fixed cost + bytes / bandwidth).
-3. **Plan** (phase C): the budget is what the running model's weights use plus the VRAM free
-   right now, minus a margin, so it is calibrated against a config known to fit. The base is
-   the card's fastest measured format; spare bytes go where published sensitivity says they
-   buy the most (output layer, attention values, FFN down, first and last layers, MTP head).
-   Three goals: same quality but faster, same speed but better, best that fits. Sizes are
-   exact: llama-quantize's dry run agrees within 2 MiB.
-4. **Build and verify** (phase D): quantize on the CPU at low priority; verify each
-   candidate against today's model with the optimizer's suites, a decode curve by depth and
-   the VRAM it really occupies.
-5. **Parts** (phase E): output layer, MTP head and embeddings are chosen separately; the
-   projector, stable-diffusion.cpp and audio.cpp models convert here too.
-6. **Upstream watch** (phase F): a daily check for a newer source revision or quantizer. It
-   reports; it never downloads.
+The web UI is intentionally thin over a JSON API. The panel itself binds loopback (`127.0.0.1:8090`) and is intended to sit behind Caddy.
 
-Quality is ranked with priors until KL divergence is measured, and every plan says so. See
-**[fit/README.md](fit/README.md)** and the worked example **[fit/FINDINGS.md](fit/FINDINGS.md)**
-(Qwen3.8-27B on a 7900 XTX: IQ4_XS is the fastest and smallest decoder there; decode is almost
-purely bytes read).
+The generated **[API.md](API.md)** is the authoritative route list and currently documents **173 routes** covering instance lifecycle/configuration, optimization, workload/Auto-fit, Fit, models/downloads/templates, engines/builds, image/audio/Camelid/ONNX functions, files, GPU/power/tuning, access, gateway, fleet, Hermes, MCP, diagnostics/crashes/logs and backups.
+
+Examples:
+
+```bash
+# running servers
+curl -s http://127.0.0.1:8090/api/servers | jq
+
+# exact launch argv before a start
+curl -s 'http://127.0.0.1:8090/api/launch-plan?inst=coder' | jq '.argv, .errors, .warnings'
+
+# gateway model catalog
+curl -s https://box/v1/models -H 'Authorization: Bearer lp_...'
+```
+
+Browser cross-site protections intentionally reject request shapes that can be forged by another site while a browser automatically reuses credentials. Scripts should send JSON for POST bodies.
+
+---
+
+## Safety rails (learned the hard way)
+
+These are part of the implementation rather than recommendations in a wiki:
+
+- **No accidental second full model as a draft.** A target model used as its own external speculative draft can load another full copy; the planner refuses the known-dangerous case.
+- **No silent Vulkan system-memory fallback.** Launch plans force `GGML_VK_ALLOW_SYSMEM_FALLBACK=0` so an allocation failure does not quietly become a catastrophically slow host-RAM run.
+- **No accidental iGPU choice on the Linux/Vulkan path.** Device selection/pinning is explicit; CPU audio instances hide Vulkan ICDs.
+- **Host RAM floor.** The launcher can kill an instance before `MemAvailable` crosses the configured floor, and planning can refuse impossible starts up front.
+- **Fallback tiers.** Failed starts move toward safer known configurations instead of repeatedly executing the same broken command.
+- **Configuration refusal is not a service crash.** A refused plan uses a distinct exit path so systemd does not pointlessly retry it.
+- **Main start guard.** Repeated failed starts and restarts during loading are bounded and surfaced with the reason and reset path.
+- **Measurement jobs do not pile on top of each other.** Optimizer/depth/GPU/Fit operations use coordination so competing benchmark jobs do not make each other's numbers meaningless.
+- **GPU tuning is reversible.** Unstable live tuning can be restored, and persistent tuning requires an explicit boot-profile choice.
+- **No firmware writer.** ROM support stops at backup/check/instructions.
+
+---
+
+## Security
+
+LexiPanel is a machine-control application, so the useful security question is not *“does it have a login?”*. It is *“what can a browser, API client, agent or compromised model actually cause the host to do?”*
+
+Current guard rails include:
+
+- panel listener bound to loopback, with Caddy as the intended front door;
+- cross-site request checks appropriate to browser credential behavior;
+- literal/single-quoted settings serialization with newline rejection for shell-sourced env files;
+- raw inference ports expected to remain loopback unless deliberately exposed;
+- optional UFW LAN restriction helper;
+- terminal protected by the front door **and** PAM/Linux account login;
+- narrow sudoers/root-helper verbs rather than arbitrary root shell execution;
+- hardware-target and accepted-range validation in the power helper;
+- protected file-manager roots and in-use/reference checks;
+- MCP read-only mode and multi-user role inheritance;
+- API keys with scope-by-role/expiry;
+- hash-chained change audit;
+- safety tests that trip if code begins invoking firmware flashers, writes privileged sysfs outside the helper or broadens sudoers unexpectedly.
+
+This is still self-hosted software with a browser terminal and privileged optional hardware controls. Read the code and threat model before exposing it beyond the network/users you intend.
+
+---
 
 ## macOS (experimental)
 
-`hostos.py` gathers every question LexiPanel asks the operating system (memory, process
-details, listening ports, GPU, run folders, and the service manager: systemd on Linux,
-launchd on macOS). On Linux it returns exactly what the panel computed before. **The macOS
-side was written from Apple's documentation and has never run on a Mac.** Linux-only
-features (AMD power caps, sysfs thermals, DRM residency, journald crash triage, Vulkan
-pinning) report "not available on macOS". Reports from Apple Silicon owners are welcome.
+`hostos.py` abstracts the operating-system questions LexiPanel asks, including memory/process/listener/service-manager data. Linux/systemd is the exercised path. A launchd/macOS path exists, but Linux-specific features such as AMD sysfs tuning, DRM residency and journald crash triage naturally report unavailable.
 
-## ONNX Runtime: NPUs (AMD, Intel, Qualcomm)
+Treat macOS as experimental until exercised and reported by actual Apple Silicon users.
 
-A fifth engine for **ONNX models** (the ONNX Runtime GenAI format: a folder with
-`genai_config.json` and `model.onnx`), on the CPU or through ONNX Runtime's execution providers:
-**AMD Ryzen AI NPU** (`vitisai`), **Intel NPU / GPU / CPU** (`openvino`, pick the device),
-**Qualcomm Hexagon NPU** (`qnn`), plus `cuda`, `dml` (Windows) and `webgpu`. llama.cpp does not run
-on these NPUs; this is how LexiPanel does. Create an instance with engine *ONNX Runtime*,
-set the model folder and the provider on the Parameters tab, Start. It serves an
-OpenAI-compatible API (`/v1/chat/completions`, streaming, `stop`, `seed`).
+---
 
-- **Install the runtime once**: `bash install-onnx.sh` (CPU), or `--cuda` / `--openvino` / `--qnn`.
-  AMD's VitisAI provider comes with AMD's Ryzen AI Software; point the instance's *Runtime
-  Python* at the Python it installs. Provider packages change between releases: if the
-  Parameters tab still lists a provider as missing from the build, follow the vendor's ONNX
-  Runtime GenAI instructions and point *Runtime Python* there.
-- **Every generation option the runtime has, with a tooltip**: the 17 search options
-  onnxruntime-genai reports (`max_length`, `do_sample`, `temperature`, `top_k`, `top_p`,
-  `repetition_penalty`, beams, `random_seed`, `chunk_size`, ...), empty meaning the model's own
-  `genai_config.json` value. At every start the server sets each one and reads it back; the
-  Status tab and `/props` say how many this build accepted and which it did not. Provider
-  options (OpenVINO `device_type`, QNN `backend_path` / `htp_performance_mode`, VitisAI
-  `config_file`, anything else as JSON), a plugin provider library, CPU threads, port, address,
-  model name and API key (kept in a 0600 file, never on the command line).
-- **Readiness**: the Parameters tab shows the runtime version, which providers the installed
-  build has, and the NPUs the kernel sees (`/sys/class/accel`: `amdxdna`, `intel_vpu`, Qualcomm
-  `qaic` / fastrpc). Starting refuses a missing runtime, a folder that is not a GenAI model, a
-  provider the build lacks, QNN without its library, a LAN listener without an API key.
+## Adapting it to your box
 
-Verified here on the CPU provider (Qwen2.5-0.5B-Instruct int4, onnxruntime-genai 0.16: all 17
-options accepted and read back, chat and streaming through the panel). The NPU providers
-could not be run without the hardware: the first run on a Ryzen AI, Core Ultra or Snapdragon
-machine is their real test.
+The remaining “real machine” assumptions are intentionally documented rather than hidden behind a generic installer:
 
-## Access: single-user or multi-user
+- **User/paths:** the original layout is `admin` under `/home/admin/{panel,llama,models,sdcpp,audiocpp,...}`. Search the repo for `/home/admin` before deploying under another account/layout.
+- **Legacy `main`:** the historical launch scripts were written around the original Qwen/AMD setup. You can repoint them or ignore `main` and use ordinary instances.
+- **Hardware:** AMD is the deepest Linux implementation because that is the machine the project came from. NVIDIA is supported through its available management/runtime paths. Multi-GPU capabilities follow the underlying engine/backend rather than pretending every combination is equivalent.
+- **NPUs:** provider detection/configuration exists, but a provider only works when its vendor runtime and compatible hardware/model are actually present.
+- **Ports:** the panel/terminal/main/telemetry/instance defaults are local conventions, not protocol requirements; edit them if they collide with your environment.
 
-Chosen at setup (`install-interactive.sh` asks), changeable on the **Access** tab.
+---
 
-- **Single-user** (default): as before, Caddy's one login in front, the panel trusts what reaches it.
-- **Multi-user**: the panel checks every request itself, so even a local process needs a login.
-  Users (scrypt-hashed passwords) log in with the browser's own prompt; scripts and MCP clients
-  use **API keys** (`Authorization: Bearer lp_...`; `LEXIPANEL_API_KEY` for `mcp_server.py`),
-  each capped at its user's role, with an expiry. **viewer** reads; **operator** also starts,
-  stops, restarts and runs benchmarks, the optimizer, depth curves and auto-fit experiments;
-  **admin** everything else (settings, parameters, power, GPU tuning, files, builds, fleet,
-  users). Any change not listed for operators is admin-only, and a test fails the build if a
-  route is ever open to viewers. MCP tool calls run with the caller's role. Every change is in the
-  hash-chained **audit log**. Caddy: `systemd/Caddyfile.multi-user.new` (its login stays only in
-  front of the terminals). Locked out: `python3 auth.py mode single` as the panel's account.
+## Configuration files
 
-## Gateway and quotas
+Important state remains plain-file based:
 
-One OpenAI-compatible endpoint on the panel for every running llama.cpp, ONNX Runtime and Camelid
-instance: `GET /v1/models`, `POST /v1/chat/completions` (streaming passes through), routed by
-`model` (instance id, alias or model file name). Clients use the panel's address and a user's API
-key; each instance's own key stays inside. Per-user quotas (admin: `POST /api/gateway/quota`
-`{user, rpm, tokens_day, concurrent, models}`), refused with HTTP 429 and the reason; usage per day,
-user and model at `GET /api/gateway`. Counts only: prompts and replies are never stored.
+| State | Purpose |
+|---|---|
+| `params.env`, backend/tier env files | Legacy main + fallback configuration |
+| `instances/<id>/instance.json` + `params.env` | Per-instance identity and launch configuration |
+| engine/build state | Active builds and updater policy |
+| `profiles/`, `curves/`, `optimize/` | Model profiles and measurement history |
+| `workload/<id>/` | Preserved request/activity/config/Auto-fit evidence |
+| power/GPU tuning state | Profiles, audit, benchmarks and VBIOS backups |
+| access/gateway/fleet state | Users/keys/audit, quotas/usage and member/primary metadata |
 
-**Across the fleet**: on a member, tick *share this box's models* on the Fleet tab. Its running
-instances that listen on the LAN without an API key are then reported to the primary, and the
-primary's gateway serves them too: the same model on several boxes becomes replicas, each request
-goes to the one with the fewest open requests, and a replica that does not answer is skipped for
-the next. Offline boxes drop out on their own.
+Back up the irreplaceable configuration with `make-backup.sh`; model weights are intentionally not included.
 
-## Fleet: many boxes, one primary
-
-Full LexiPanel on every box; one is the **primary** and sees them all in its **Fleet** tab. On the
-primary: role *Primary*, then **Add a box** gives a one-time join code (30 minutes). On each other
-box: role *Member*, the primary's address, the code, Save. Members then report every minute,
-outbound only: hardware (GPUs, NPUs, RAM), instances with engine, state, model and decode speed,
-workload counts, pending auto-fit proposals, LexiPanel version. Never prompts, settings or keys.
-The primary lists every box as online, stale or offline, and can **Revoke** one. It cannot change
-anything on a member: each box is still run from its own panel. Caddy lets the two fleet routes
-(`/api/fleet/report`, `/api/fleet/join`) through without the login; the panel checks the box's
-token or the join code itself (see `systemd/Caddyfile.new`). Design and next steps, including
-striping one large model across boxes with llama.cpp RPC: [docs/FLEET.md](docs/FLEET.md).
+---
 
 ## Checks before an upload
 
-`bash tests/run_all.sh` runs everything GitHub runs (about 6 minutes; `--quick` for compile, unit
-tests and script syntax in under one) and ends with **OK to upload** or the failures. The browser
-checks need node and, once, `cd tests/ui && npm install && npx playwright install chromium`;
-without them that part says SKIP. `tests/test_safety.py` is the tripwire for what LexiPanel must
-never do: run a firmware flasher, write `/sys` outside the root helper, widen the sudoers rules.
+The repository includes unit/fake-sysfs tests, Auto-fit end-to-end tests and a combined pre-upload runner.
+
+```bash
+bash tests/run_all.sh          # full suite used by CI
+bash tests/run_all.sh --quick  # compile/unit/script checks
+```
+
+Browser tests require Node/Playwright setup. Hardware-independent tests should not need a GPU.
+
+`tests/test_safety.py` is deliberately a tripwire for actions the project never wants to learn how to do casually, including firmware flashing, broad privileged sysfs writes and widened sudo permissions.
+
+Generated docs such as `PARAMETERS.md` and `API.md` should be regenerated/checked with code changes so claims do not drift from the implementation.
+
+---
 
 ## File layout
 
+```text
+panel.py               HTTP backend: routes, orchestration, launch plans, estimators, diagnostics
+instance_launch.py     execute a plan; failure counter, RAM watchdog, log archival
+
+auth.py                single/multi-user auth, roles, API keys, hash-chained audit
+gateway.py             unified /v1 routing, per-user quotas and usage
+fleet.py               primary/member join, reports and fleet model routing
+docs/FLEET.md          fleet behavior and future distributed work
+
+engines.py             upstream engine catalogs/build activation/update policy
+sdcpp.py               stable-diffusion.cpp instances and generation
+camelid.py             Camelid instances/catalog/chat proxy
+audiocpp.py            audio.cpp catalog, instances, runs and outputs
+onnxrt.py               ONNX engine configuration/provider/NPU detection
+onnx_server.py          OpenAI-compatible ONNX Runtime GenAI server
+install-onnx.sh         ONNX runtime environment installer
+
+webui.py               llama.cpp built-in web UI integration
+hermes.py              Hermes readiness checks/config generation
+mcp_server.py          stdio + Streamable HTTP MCP tools
+
+optimizer.py           candidate/model benchmarking and workload-weighted optimization
+optimize_suite.py      coding/agent benchmark tasks
+depthcurve.py          decode-vs-context measurement with thermals
+workload.py            real-request profile, activity envelope and findings
+autofit.py             idle experiments, proposal/apply, verification and rollback
+
+fitquant.py            Fit measurement/solver/build/verify jobs
+fitrecipe.py           portable/explainable tensor-role recipes
+fit/                   source/measurement docs and worked findings
+refusals.py            expected-refusal / over-refusal evaluation
+
+gpupower.py            per-GPU caps
+gputune.py             GPU detail/tuning/benchmark/VBIOS checks
+poweropts.py           host power profiles, drift, stability and budgets
+power/                  constrained privileged helper, sudoers and boot unit
+hostos.py               Linux/macOS operating-system abstraction
+
+filemgr.py             protected home-folder file manager
+flagcatalog.py          discover active-build flags from --help
+flaghelp.py             plain-English help
+main_devices.py         legacy-main device selection
+
+static/index.html       entire browser UI; no build step
+gg/                     Graph Gauntlet source/tests/guide
+systemd/                services, front-door templates, sudoers/OverDrive snippets
+launch-scripts/         legacy main scripts and backend benchmark helper
+examples/               example configuration
+tests/                  unit, safety, UI and E2E checks
+.github/workflows/      repository CI
+
+install-interactive.sh  guided install/update/check
+install-panel-deps.sh   host dependencies and optional runtime packages
+install.sh              Caddy + panel + ttyd setup
+install-autostart.sh    legacy-main boot service
+lockdown.sh             LAN firewall helper
+fix-firewall.sh         firewall change with rollback guard
+make-backup.sh          configuration/state backup
+
+audit-flags.sh          compare launch flags with the active binary
+PARAMETERS.md           generated parameter reference
+API.md                  generated HTTP API reference
+CHANGELOG.md            release history
 ```
-panel.py              backend: HTTP API, launch plans, estimators, crash triage
-instance_launch.py    runs one instance: plan → server, failure counter, RAM watchdog
-engines.py            build catalogs (llama.cpp, sd.cpp, audio.cpp, Camelid) + daily updater
-sdcpp.py              stable-diffusion.cpp instances: params, presets, jobs, gallery
-camelid.py            Camelid instances: params, catalog pulls, launch plan, chat proxy
-hostos.py             OS layer: Linux (tested) and macOS (experimental) answers in one place
-audiocpp.py           audio.cpp instances: params, model catalog/installs, runs, outputs
-gpupower.py           per-GPU power caps, saved and re-applied
-gputune.py            GPU Tuning: card details, tuning settings via the power helper, benchmark, VBIOS
-poweropts.py          Power options: equipment, settings, profiles, boot profile, stability, UPS
-power/                the root helper (lexipanel_power.py), its installer, sudoers rule and boot unit
-mcp_server.py         MCP tools for AI clients: stdio server and the /api/mcp handler
-hermes.py             Hermes Agent: readiness checks and its config.yaml for an instance
-onnxrt.py             ONNX Runtime engine: parameters, NPU detection, launch plan
-onnx_server.py        its OpenAI-compatible server (onnxruntime-genai), options verified at start
-install-onnx.sh       the runtime in ~/onnxrt/venv (--cuda, --openvino, --qnn)
-webui.py              llama.cpp's built-in web UI per instance
-filemgr.py            Files tab: home-folder browse, streamed upload/download, zip, copy/move, guard rails
-optimizer.py          benchmark-driven parameter search (+ models mode for Fit, workload-weighted runs)
-workload.py           workload profile: request store, hourly activity, envelope, findings
-autofit.py            auto-fit: idle-window experiments, keep / propose / apply, verify, roll back
-fitquant.py           Fit: size tables, card speed models, solver, build/bench/imatrix/verify jobs
-refusals.py           refusal check: declines vs over-refusals of the running model, strict + keyword verdicts
-optimize_suite.py     the agentic / coding benchmark prompts
-depthcurve.py         decode tokens/s vs context depth, with in-request thermals
-flagcatalog.py        every flag of the active build, parsed from --help
-flaghelp.py           plain-English help for those flags
-main_devices.py       device selection for the legacy main instance
-static/index.html     the whole UI (single page, no build step)
-gg/                   Graph Gauntlet: game source, apply script, tests, AI rebuild guide
-fit/                  Fit: phase A/B scripts, README, worked-example findings
-systemd/              units, sudoers rule, Caddyfile template, GRUB OverDrive snippet
-launch-scripts/       run_llama_{vulkan,rocm,cpu}.sh, bench_backends.sh
-examples/             sample params.env and tier file
-tests/                python3 -m unittest discover tests (fake sysfs, no GPU needed);
-                      tests/e2e/run.sh: auto-fit end to end against a stand-in llama-server;
-                      tests/run_all.sh: every check, run before uploading (tests/ci/, tests/ui/)
-.github/workflows/    the same checks on GitHub, on every push
-install-interactive.sh  guided install of everything below (--check changes nothing)
-install-panel-deps.sh required packages, plus --rocm --tts --jinja --ups
-install.sh            Caddy + panel + ttyd units
-install-autostart.sh  main LLM on boot + scoped sudoers
-lockdown.sh           ufw: raw ports LAN-only
-fix-firewall.sh       add allow rules safely, with a dead-man rollback
-make-backup.sh        tarball of every hard-to-reproduce config (no model weights)
-audit-flags.sh        check the launch script's flags against the build's --help
-start.sh              run the panel by hand (dev)
-PARAMETERS.md         every setting, generated from the code
-API.md                every route, generated from the code
-CHANGELOG.md          release notes
-auth.py               Access: single / multi-user, users, roles, API keys, audit chain
-gateway.py            one /v1 endpoint for every instance, per-user quotas, usage
-fleet.py              Fleet: roles, join codes, per-box tokens, reports to the primary
-docs/FLEET.md         Fleet design: what v1 does, what comes next (striping a model across boxes)
-docs/ROADMAP.md       planned after 1.0.0: users and roles, gateway and quotas, fleet serving, SOC 2 readiness
-```
+
+---
+
+## What LexiPanel is not
+
+A broad control plane is easy to oversell, so the boundary matters:
+
+- It is **not** a replacement for Open WebUI's chat/RAG/collaboration product. Use Open WebUI in front if that is the experience you want.
+- It is **not** a replacement for llama.cpp; llama.cpp is one of the engines that makes the project useful.
+- It is **not** as frictionless as Ollama or LM Studio for a person who simply wants to download one model and chat.
+- It is **not** as polished or cross-platform a guided local-AI/browser product as LumaBrowser.
+- It is **not** as compact a one-file multimodal package as KoboldCpp.
+- It is **not** as generic a hot-swap proxy as llama-swap today.
+- It is **not** as broad a backend ecosystem as LocalAI.
+- It is **not** a ComfyUI-style media workflow graph.
+- It is **not** a vLLM/Kubernetes/Ray-scale distributed inference scheduler.
+- It is **not** fully hardware-agnostic yet. AMD/Linux remains the deepest path and NPU/macOS support needs more real machines.
+- It is **not** mature merely because a feature exists in source. This is a young project and needs more external hardware, users, soak time and reproducible comparative data.
+
+Those are design boundaries and maturity limits, not hidden footnotes.
+
+---
+
+## Why keep building this instead of gluing tools together?
+
+You absolutely can glue together a server runner, GPU monitor, benchmark scripts, quantizer, reverse proxy, auth layer, Prometheus dashboards and a collection of shell helpers. LexiPanel started that way.
+
+The value of combining them is that the pieces can share evidence:
+
+- the memory estimator knows what every other managed instance already occupies;
+- the optimizer knows which depth bands real requests spend their decode time in;
+- Auto-fit knows when the box is normally idle and whether a change survived later traffic;
+- Fit knows the VRAM budget of a configuration that already works and the quant formats measured on those exact cards;
+- GPU tuning knows the throughput and power of the model actually served;
+- crash triage can connect a failed boot with the settings/power profile that were active;
+- the gateway/fleet knows which managed instances are actually available;
+- an MCP client can ask for that evidence through the same rules the browser uses.
+
+The integration is the feature.
+
+---
+
+## Roadmap direction
+
+The project is already broad enough. The highest-value work is increasingly about **maturity and generalization rather than adding random tabs**:
+
+- exercise the existing paths across more AMD, NVIDIA, Intel, Apple and NPU machines;
+- remove historical `/home/admin` assumptions from installation/state paths;
+- deepen engine/plugin abstraction so a new server can be added without teaching every panel subsystem about it;
+- add stronger optimizer search strategies while preserving workload-aware scoring and real-traffic verification;
+- make fleet routing/health more observable and continue the documented distributed/RPC experiments;
+- keep generated docs, tests and security tripwires synchronized with the rapidly growing route/feature surface;
+- publish reproducible hardware/model benchmark and Fit case studies rather than generic performance claims.
+
+See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the implementation roadmap.
+
+---
 
 ## Credits
 
-Built on [llama.cpp](https://github.com/ggml-org/llama.cpp),
-[stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp),
-[audio.cpp](https://github.com/0xShug0/audio.cpp) and [ggml](https://github.com/ggml-org/ggml),
-fronted by [Caddy](https://caddyserver.com) and [ttyd](https://github.com/tsl0922/ttyd).
-Model weights keep their own licenses.
+LexiPanel stands on upstream projects rather than hiding them behind a brand. In particular:
+
+- [llama.cpp](https://github.com/ggml-org/llama.cpp)
+- [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp)
+- [audio.cpp](https://github.com/0xShug0/audio.cpp)
+- [ggml](https://github.com/ggml-org/ggml)
+- [Caddy](https://caddyserver.com/)
+- [ttyd](https://github.com/tsl0922/ttyd)
+- [ONNX Runtime GenAI](https://github.com/microsoft/onnxruntime-genai)
+
+The comparative projects linked earlier are also worth reading directly. Many are better at their own layer; LexiPanel's purpose is to make those layers easier to operate as one measurable local-AI machine.
+
+Model weights, runtimes and upstream components retain their own licenses.
 
 ## License
 
