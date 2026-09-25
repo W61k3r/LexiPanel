@@ -1,0 +1,26 @@
+LexiPanel 1.0.0: how to put this release on GitHub. (You can delete this file afterwards;
+it is not part of the panel.)
+
+1. BEFORE UPLOADING, on your box, from this folder:
+     bash tests/run_all.sh
+   Upload only when it ends with "OK to upload". (The browser part needs, once:
+   cd tests/ui && npm install && npx playwright install chromium)
+
+2. UPLOAD every file and folder here with "Add file > Upload files", replacing what is on main.
+
+3. BY HAND on github.com (the uploader silently skips names that start with a dot):
+   a. Add file > Create new file, name:  .github/workflows/ci.yml
+      paste the contents of  .github/workflows/ci.yml  from this folder, Commit.
+      From then on every push runs the checks: see the repository's "Actions" tab.
+   b. Add file > Create new file, name:  .gitignore
+      paste the contents of  .gitignore  from this folder, Commit.
+   c. Replace systemd/Caddyfile.new on your box's Caddy config if you use Fleet (two routes skip
+      the login; the panel checks their token). Then delete power/__pycache__/lexipanel_power.cpython-314.pyc (open it on github.com,
+      "..." menu > Delete file): compiled junk from an earlier upload.
+
+4. MARK THE RELEASE: Releases > Draft a new release > Choose a tag: type  v1.0.0  > Create
+   new tag on publish. Title "LexiPanel 1.0.0", paste the "## 1.0.0" section of CHANGELOG.md
+   as the notes, attach this zip if you like, Publish.
+
+On the box itself: bash install-interactive.sh --check  first (changes nothing), then without
+--check. Updating an existing install keeps every settings file, instance and result.
