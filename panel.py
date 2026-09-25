@@ -16,6 +16,9 @@ from pathlib import Path
 
 import hostos                                       # noqa: E402  (Linux/macOS layer)
 HOME       = Path.home() if (hostos.IS_MAC or hostos.IS_WIN) else Path("/home/smbadmin")
+# Program files stay next to panel.py. PANEL is state (instances, auth, remote
+# servers) and may be a different directory.
+CODE       = Path(__file__).resolve().parent
 # INF01_PANEL_DIR lets a scratch copy run beside the live panel (on another
 # PANEL_PORT) without touching the live panel's files.
 PANEL      = Path(os.environ.get("INF01_PANEL_DIR") or HOME / "panel")
@@ -7676,7 +7679,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._send(dict(error=str(e)), 404)
         try:
             if p in ("/", "/index.html"):
-                return self._send((PANEL / "static/index.html").read_text(),
+                return self._send((CODE / "static/index.html").read_text(encoding="utf-8"),
                                   ctype="text/html; charset=utf-8")
             if INST().get("engine") in GEN_ENGINES and p in _LLAMA_ONLY_GET:
                 return self._send(dict(na=True, error=f"not used by {INST()['engine']} "
