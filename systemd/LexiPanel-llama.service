@@ -1,0 +1,42 @@
+[Unit]
+Description=LexiPanel llama.cpp Qwen3.8-27B inference server
+Documentation=file:///home/admin/llama/README.md
+After=network-online.target
+Wants=network-online.target
+
+# Rate-limit restarts. These MUST live in [Unit]: systemd ignores them in
+# [Service] (silently), which would leave a crash loop unthrottled on a box
+# that has already been OOM-locked twice.
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=admin
+Group=admin
+# RADV opens /dev/dri/renderD* directly. Granting the group here means the
+# script's own 'sg render' re-exec is never needed under systemd.
+SupplementaryGroups=render video
+WorkingDirectory=/home/admin/llama
+
+# The GPU node must exist before RADV will enumerate anything. On a cold boot
+# amdgpu can still be probing when multi-user.target is reached.
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do [ -e /dev/dri/renderD128 ] && exit 0; sleep 1; done; echo "no DRM render node after 30s"; exit 1'
+ExecStart=/bin/bash /home/admin/llama/run_llama_vulkan.sh
+
+# The script backgrounds llama-server and waits on it; kill the whole cgroup so
+# nothing is orphaned.
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=45
+
+# Restart on crash, but do NOT hammer. This box has been OOM-locked before, and
+# a tight restart loop on a 15.7GB model is its own denial of service.
+Restart=on-failure
+RestartSec=20
+
+# Deliberately no MemoryMax: a hard cap would OOM-kill mid-inference. The
+# launch script carries its own MemAvailable watchdog instead.
+
+[Install]
+WantedBy=multi-user.target

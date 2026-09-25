@@ -1,0 +1,10 @@
+# Lets the panel (running as admin) drive the llama unit without a password.
+# Scoped to one unit and four verbs - no wildcards, no general systemctl access.
+admin ALL=(root) NOPASSWD: /usr/bin/systemctl start LexiPanel-llama, \
+                              /usr/bin/systemctl start LexiPanel-llama.service, \
+                              /usr/bin/systemctl stop LexiPanel-llama, \
+                              /usr/bin/systemctl stop LexiPanel-llama.service, \
+                              /usr/bin/systemctl restart LexiPanel-llama, \
+                              /usr/bin/systemctl restart LexiPanel-llama.service, \
+                              /usr/bin/systemctl reset-failed LexiPanel-llama, \
+                              /usr/bin/systemctl reset-failed LexiPanel-llama.service

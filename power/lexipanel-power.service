@@ -1,0 +1,17 @@
+# LexiPanel power options: records this boot's firmware/kernel defaults, then applies the
+# boot profile chosen in the panel (Power options tab). Installed by install-power.sh.
+[Unit]
+Description=LexiPanel power options (record boot defaults, apply boot profile)
+After=systemd-modules-load.service systemd-udev-trigger.service local-fs.target
+Wants=systemd-modules-load.service
+# before the inference servers, so they never start under the old settings
+Before=inf01-llama.service LexiPanel-llama.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/lexipanel-power boot
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

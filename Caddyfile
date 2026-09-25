@@ -1,0 +1,33 @@
+# LexiPanel. LAN only.
+# NOTE: directive is 'basicauth' on Caddy < 2.8 and 'basic_auth' on >= 2.8.
+# This box has 2.6.2, so 'basicauth'. install.sh rewrites it per version.
+# TLS uses Caddy's internal CA: it mints a cert and runs its own root.
+# Install that root once per browser to drop the warning:
+#   sudo cp /var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt \
+#           /tmp/LexiPanel-root.crt   (then import into your browser/OS trust store)
+{
+    admin off
+}
+
+https://192.0.2.10 {
+    tls internal
+
+    basicauth {
+        # placeholder - install.sh replaces it with a real bcrypt hash
+        admin $2a$14$REPLACE_ME
+    }
+
+    # Claude Code terminal (ttyd). Websocket upgrade is handled automatically.
+    handle_path /terminal/* {
+        reverse_proxy 127.0.0.1:8092
+    }
+
+    # Control API + UI
+    handle {
+        reverse_proxy 127.0.0.1:8090
+    }
+
+    log {
+        output file /var/log/caddy/LexiPanel-panel.log
+    }
+}

@@ -1,0 +1,9 @@
+# Lets the LexiPanel panel (running as @USER@) change power settings through ONE root helper.
+# Only these five verbs; the helper validates every target and value itself
+# (see /usr/local/sbin/lexipanel-power). "vbios" only reads a GPU's VBIOS image.
+# "boot" is for the systemd unit only.
+@USER@ ALL=(root) NOPASSWD: /usr/local/sbin/lexipanel-power status, \
+                            /usr/local/sbin/lexipanel-power apply, \
+                            /usr/local/sbin/lexipanel-power persist, \
+                            /usr/local/sbin/lexipanel-power unpersist, \
+                            /usr/local/sbin/lexipanel-power vbios

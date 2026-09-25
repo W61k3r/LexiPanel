@@ -1,0 +1,39 @@
+# LexiPanel admin panel. LAN only.
+# TLS uses Caddy's internal CA: it mints a cert and runs its own root.
+# Install that root once per browser to drop the warning:
+#   sudo cp /var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt \
+#           /tmp/LexiPanel-root.crt   (then import into your browser/OS trust store)
+{
+    admin off
+}
+
+https://192.0.2.10 {
+    tls internal
+
+    # Multi-user mode (auth.py): the panel checks every panel request itself, per user and role.
+    # Caddy's login stays only in front of the terminals, which are shells.
+    @login path /terminal/* /shell/*
+    basicauth @login {
+        # placeholder - install.sh replaces it with a real bcrypt hash
+        admin $2a$14$REPLACE_ME
+    }
+
+    # Claude Code terminal (ttyd). Websocket upgrade is handled automatically.
+    handle_path /terminal/* {
+        reverse_proxy 127.0.0.1:8091
+    }
+
+    # Real login shell (ttyd). Same basicauth + TLS as the rest of the site.
+    handle_path /shell/* {
+        reverse_proxy 127.0.0.1:8092
+    }
+
+    # Control API + UI
+    handle {
+        reverse_proxy 127.0.0.1:8090
+    }
+
+    log {
+        output file /var/log/caddy/LexiPanel-panel.log
+    }
+}

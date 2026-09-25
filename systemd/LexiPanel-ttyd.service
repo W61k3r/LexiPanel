@@ -1,0 +1,19 @@
+[Unit]
+Description=LexiPanel Claude Code terminal (ttyd)
+After=network.target
+
+[Service]
+Type=simple
+User=admin
+Group=admin
+WorkingDirectory=/home/admin
+Environment=TERM=xterm-256color
+# Bound to localhost: Caddy fronts it and does the auth. Never expose directly.
+# 'render' group so anything launched here can reach the GPU.
+# -W makes the terminal writable; without it ttyd is read-only.
+ExecStart=/usr/bin/sg render -c "/usr/bin/ttyd -p 8091 -i 127.0.0.1 -W -O -t fontSize=14 -t theme={\\"background\\":\\"#0d1017\\"} /usr/bin/su -l admin -c /home/admin/.local/bin/claude"
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

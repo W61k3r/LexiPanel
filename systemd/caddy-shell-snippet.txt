@@ -1,0 +1,4 @@
+    # Real login shell (ttyd). Same basicauth + TLS as the rest of the site.
+    handle_path /shell/* {
+        reverse_proxy 127.0.0.1:8092
+    }
