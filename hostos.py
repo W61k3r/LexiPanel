@@ -335,6 +335,21 @@ def mac_gpu():
 # --------------------------------------------------------------------------
 # run folders
 # --------------------------------------------------------------------------
+_WIN_SERVERS = ("llama-server.exe", "sd-server.exe", "audiocpp_server.exe",
+                 "camelid.exe", "onnx-server.exe")
+
+
+def win_server_pids():
+    """Pids of inference servers on this Windows machine. pgrep is absent here,
+    and the process name has an .exe suffix, so the Linux exact match misses them."""
+    names = ",".join("'%s'" % n for n in _WIN_SERVERS)
+    ps = ("Get-CimInstance Win32_Process | "
+          "Where-Object { $_.Name -in @(%s) } | "
+          "ForEach-Object { $_.ProcessId }") % names
+    out = _out(["powershell", "-NoProfile", "-Command", ps], timeout=25)
+    return sorted(int(x) for x in out.split() if x.isdigit())
+
+
 def win_gpus():
     """NVIDIA cards from nvidia-smi, in panel.gpu_devices() shape. Ids are nv0,
     nv1, ... because a PCI BDF contains ':' and cannot be a path segment on NTFS."""

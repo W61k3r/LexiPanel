@@ -619,6 +619,14 @@ Treat macOS as experimental until exercised and reported by actual Apple Silicon
 
 The panel still binds to localhost. Point a browser at the address it prints. GPU tuning and power profiles remain Linux features.
 
+Servers LexiPanel did not start on this machine are listed from `<panel dir>/remote-servers.json`:
+
+```json
+{"servers": [{"name": "pair", "url": "http://other-host:8031"}]}
+```
+
+`/api/servers` probes each URL. On Windows, local `llama-server.exe` and `sd-server.exe` processes are found without `pgrep`.
+
 ---
 
 ## Adapting it to your box

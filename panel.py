@@ -304,7 +304,11 @@ def _argv_get(argv, names):
 
 
 def server_pids():
-    # sd-server, audiocpp_server and camelid too: those instances are servers of this panel
+    # sd-server, audiocpp_server and camelid too: those instances are servers of this panel.
+    # Linux: pgrep -x matches the process name. Windows has no pgrep, and the
+    # image name is llama-server.exe, so the same pattern would miss it.
+    if hostos.IS_WIN:
+        return hostos.win_server_pids()
     out = sh("pgrep -x 'llama-server|sd-server|audiocpp_server|camelid|onnx-server'")
     return sorted(int(x) for x in out.split() if x.isdigit())
 
@@ -400,7 +404,7 @@ def _describe_server(pid):
     a = {k: _argv_get(argv, v) for k, v in _ARG_ALIASES.items()}
     env = {}
     try:
-        if hostos.IS_MAC:
+        if hostos.IS_MAC or hostos.IS_WIN:
             pairs = hostos.proc_environ(pid).items()
         else:
             pairs = (kv.partition("=")[::2] for kv in
@@ -517,11 +521,86 @@ def _describe_sd_server(pid, argv, mod=None):
     return rec
 
 
-def list_servers():
-    """All running llama-server processes, queried in parallel.
+def remote_server_specs():
+    """Optional addresses of servers this panel did not start.
 
-    Parallel because each is asked over HTTP, and a server that is mid-load or
-    wedged would otherwise add its full timeout to /api/status per server.
+    File: <panel dir>/remote-servers.json
+      {"servers": [{"name": "pair", "url": "http://host:8031"}, ...]}
+    A bare URL string is also accepted. This is how a panel on one machine
+    lists llama.cpp, sd.cpp, or MLX already listening on another. The file is
+    local configuration, not part of the program.
+    """
+    path = PANEL / "remote-servers.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    rows = data.get("servers") if isinstance(data, dict) else data
+    if not isinstance(rows, list):
+        return []
+    out = []
+    for row in rows:
+        if isinstance(row, str) and row.strip():
+            out.append({"url": row.strip()})
+        elif isinstance(row, dict) and str(row.get("url") or "").strip():
+            out.append({"name": row.get("name") or "", "url": str(row["url"]).strip()})
+    return out
+
+
+def _describe_remote(spec):
+    """One /api/servers row for a base URL, with no local pid."""
+    url = spec["url"].rstrip("/")
+    parsed = urllib.parse.urlparse(url if "://" in url else "http://" + url)
+    host, port = parsed.hostname, parsed.port
+    if not host or not port:
+        return dict(pid=None, name=spec.get("name") or "", error="url needs a host and port",
+                    warnings=[], remote=True)
+    name = spec.get("name") or ""
+    props = _server_http(host, port, "/props")
+    health = _server_http(host, port, "/health")
+    slots = _server_http(host, port, "/slots")
+    n_slots = len(slots) if isinstance(slots, list) else None
+    if isinstance(health, dict) and health.get("status") == "ok":
+        state = "ok"
+    elif isinstance(health, dict) and health.get("_http_error") == 503:
+        state = "loading"
+    elif health is None:
+        state = "no answer"
+    else:
+        state = str((health or {}).get("status") or (health or {}).get("_http_error") or "?")
+    if isinstance(props, dict) and (props.get("model_alias") or props.get("model_path")):
+        model = props.get("model_path") or ""
+        return dict(pid=None, remote=True, name=name, alias=props.get("model_alias"),
+                    model=model, model_name=Path(str(model)).name if model else None,
+                    host=host, port=int(port), health=state, slots=n_slots,
+                    slots_busy=None, engine="llama.cpp", managed=False, instance=None,
+                    warnings=[], argv=[])
+    cap = _server_http(host, port, "/sdcpp/v1/capabilities")
+    if isinstance(cap, dict) and cap.get("current_mode"):
+        return dict(pid=None, remote=True, name=name or "image", alias=name or "image",
+                    model="qwen-image", model_name="qwen-image", host=host, port=int(port),
+                    health="ok", slots=1,
+                    engine="sd.cpp", managed=False, instance=None, warnings=[], argv=[])
+    models = _server_http(host, port, "/v1/models")
+    if isinstance(models, dict) and models.get("data"):
+        ids = [m.get("id") for m in models["data"] if isinstance(m, dict) and m.get("id")]
+        mid = next((i for i in ids if "qwen" in i.lower()), None) or (ids[-1] if ids else None)
+        label = Path(str(mid)).name if mid else (name or "mlx")
+        return dict(pid=None, remote=True, name=name or "mlx", alias=label,
+                    model=mid or "", model_name=label, host=host, port=int(port),
+                    health="ok" if state == "no answer" else state, slots=None,
+                    engine="mlx", managed=False, instance=None, warnings=[], argv=[])
+    return dict(pid=None, remote=True, name=name, host=host, port=int(port),
+                health=state, error="no recognized model endpoint", warnings=[], argv=[])
+
+
+def list_servers():
+    """Running inference servers on this machine, plus any addresses in
+    remote-servers.json.
+
+    Local discovery is parallel because each server is asked over HTTP, and a
+    server that is mid-load or wedged would otherwise add its full timeout to
+    /api/status per server.
     """
     pids = server_pids()
     for gone in set(_srv_prev) - set(pids):
@@ -539,6 +618,12 @@ def list_servers():
     for t in ts:
         t.join(6)
     out = [res[p] for p in pids if res.get(p)]
+    for spec in remote_server_specs():
+        try:
+            out.append(_describe_remote(spec))
+        except Exception as e:
+            out.append(dict(pid=None, remote=True, name=spec.get("name") or "",
+                            error=str(e), warnings=[]))
     return sorted(out, key=lambda s: (not s.get("managed"), str(s.get("port"))))
 
 
