@@ -13,7 +13,11 @@ does not care which engine serves the model.
 Code runs in bubblewrap (no network, no view of /home, fresh /tmp) when bwrap
 is installed, and always under CPU/memory/file-size rlimits and a timeout.
 """
-import json, os, random, re, resource, shutil, subprocess, tempfile
+import json, os, random, re, shutil, subprocess, tempfile
+try:
+    import resource
+except ImportError:
+    resource = None                                          # Windows has no resource module
 
 SANDBOX_TIMEOUT = 25
 _BWRAP = shutil.which("bwrap")
@@ -23,6 +27,8 @@ _BWRAP = shutil.which("bwrap")
 # sandbox
 # ============================================================================
 def _limits():
+    if resource is None:
+        return
     resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
     resource.setrlimit(resource.RLIMIT_AS, (1 << 30, 1 << 30))
     resource.setrlimit(resource.RLIMIT_FSIZE, (10 << 20, 10 << 20))

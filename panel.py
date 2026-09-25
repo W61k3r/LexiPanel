@@ -9,13 +9,16 @@ tool. http.server is enough.
 Binds 127.0.0.1 only. Caddy terminates TLS and does auth in front of it.
 Never bind this to 0.0.0.0 - it starts processes and downloads files.
 """
-import fcntl, hashlib, json, os, re, shlex, shutil, struct, signal, subprocess, sys, threading, time, urllib.error, urllib.request, urllib.parse
+import hashlib, json, os, re, shlex, shutil, struct, signal, subprocess, sys, threading, time, urllib.error, urllib.request, urllib.parse
 import http.server, socketserver
 from collections import deque
 from pathlib import Path
 
 import hostos                                       # noqa: E402  (Linux/macOS layer)
-HOME       = Path.home() if hostos.IS_MAC else Path("/home/smbadmin")
+HOME       = Path.home() if (hostos.IS_MAC or hostos.IS_WIN) else Path("/home/smbadmin")
+# Program files stay next to panel.py. PANEL is state (instances, auth, remote
+# servers) and may be a different directory.
+CODE       = Path(__file__).resolve().parent
 # INF01_PANEL_DIR lets a scratch copy run beside the live panel (on another
 # PANEL_PORT) without touching the live panel's files.
 PANEL      = Path(os.environ.get("INF01_PANEL_DIR") or HOME / "panel")
@@ -304,7 +307,11 @@ def _argv_get(argv, names):
 
 
 def server_pids():
-    # sd-server, audiocpp_server and camelid too: those instances are servers of this panel
+    # sd-server, audiocpp_server and camelid too: those instances are servers of this panel.
+    # Linux: pgrep -x matches the process name. Windows has no pgrep, and the
+    # image name is llama-server.exe, so the same pattern would miss it.
+    if hostos.IS_WIN:
+        return hostos.win_server_pids()
     out = sh("pgrep -x 'llama-server|sd-server|audiocpp_server|camelid|onnx-server'")
     return sorted(int(x) for x in out.split() if x.isdigit())
 
@@ -400,7 +407,7 @@ def _describe_server(pid):
     a = {k: _argv_get(argv, v) for k, v in _ARG_ALIASES.items()}
     env = {}
     try:
-        if hostos.IS_MAC:
+        if hostos.IS_MAC or hostos.IS_WIN:
             pairs = hostos.proc_environ(pid).items()
         else:
             pairs = (kv.partition("=")[::2] for kv in
@@ -517,11 +524,86 @@ def _describe_sd_server(pid, argv, mod=None):
     return rec
 
 
-def list_servers():
-    """All running llama-server processes, queried in parallel.
+def remote_server_specs():
+    """Optional addresses of servers this panel did not start.
 
-    Parallel because each is asked over HTTP, and a server that is mid-load or
-    wedged would otherwise add its full timeout to /api/status per server.
+    File: <panel dir>/remote-servers.json
+      {"servers": [{"name": "pair", "url": "http://host:8031"}, ...]}
+    A bare URL string is also accepted. This is how a panel on one machine
+    lists llama.cpp, sd.cpp, or MLX already listening on another. The file is
+    local configuration, not part of the program.
+    """
+    path = PANEL / "remote-servers.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    rows = data.get("servers") if isinstance(data, dict) else data
+    if not isinstance(rows, list):
+        return []
+    out = []
+    for row in rows:
+        if isinstance(row, str) and row.strip():
+            out.append({"url": row.strip()})
+        elif isinstance(row, dict) and str(row.get("url") or "").strip():
+            out.append({"name": row.get("name") or "", "url": str(row["url"]).strip()})
+    return out
+
+
+def _describe_remote(spec):
+    """One /api/servers row for a base URL, with no local pid."""
+    url = spec["url"].rstrip("/")
+    parsed = urllib.parse.urlparse(url if "://" in url else "http://" + url)
+    host, port = parsed.hostname, parsed.port
+    if not host or not port:
+        return dict(pid=None, name=spec.get("name") or "", error="url needs a host and port",
+                    warnings=[], remote=True)
+    name = spec.get("name") or ""
+    props = _server_http(host, port, "/props")
+    health = _server_http(host, port, "/health")
+    slots = _server_http(host, port, "/slots")
+    n_slots = len(slots) if isinstance(slots, list) else None
+    if isinstance(health, dict) and health.get("status") == "ok":
+        state = "ok"
+    elif isinstance(health, dict) and health.get("_http_error") == 503:
+        state = "loading"
+    elif health is None:
+        state = "no answer"
+    else:
+        state = str((health or {}).get("status") or (health or {}).get("_http_error") or "?")
+    if isinstance(props, dict) and (props.get("model_alias") or props.get("model_path")):
+        model = props.get("model_path") or ""
+        return dict(pid=None, remote=True, name=name, alias=props.get("model_alias"),
+                    model=model, model_name=Path(str(model)).name if model else None,
+                    host=host, port=int(port), health=state, slots=n_slots,
+                    slots_busy=None, engine="llama.cpp", managed=False, instance=None,
+                    warnings=[], argv=[])
+    cap = _server_http(host, port, "/sdcpp/v1/capabilities")
+    if isinstance(cap, dict) and cap.get("current_mode"):
+        return dict(pid=None, remote=True, name=name or "image", alias=name or "image",
+                    model="qwen-image", model_name="qwen-image", host=host, port=int(port),
+                    health="ok", slots=1,
+                    engine="sd.cpp", managed=False, instance=None, warnings=[], argv=[])
+    models = _server_http(host, port, "/v1/models")
+    if isinstance(models, dict) and models.get("data"):
+        ids = [m.get("id") for m in models["data"] if isinstance(m, dict) and m.get("id")]
+        mid = next((i for i in ids if "qwen" in i.lower()), None) or (ids[-1] if ids else None)
+        label = Path(str(mid)).name if mid else (name or "mlx")
+        return dict(pid=None, remote=True, name=name or "mlx", alias=label,
+                    model=mid or "", model_name=label, host=host, port=int(port),
+                    health="ok" if state == "no answer" else state, slots=None,
+                    engine="mlx", managed=False, instance=None, warnings=[], argv=[])
+    return dict(pid=None, remote=True, name=name, host=host, port=int(port),
+                health=state, error="no recognized model endpoint", warnings=[], argv=[])
+
+
+def list_servers():
+    """Running inference servers on this machine, plus any addresses in
+    remote-servers.json.
+
+    Local discovery is parallel because each server is asked over HTTP, and a
+    server that is mid-load or wedged would otherwise add its full timeout to
+    /api/status per server.
     """
     pids = server_pids()
     for gone in set(_srv_prev) - set(pids):
@@ -539,6 +621,12 @@ def list_servers():
     for t in ts:
         t.join(6)
     out = [res[p] for p in pids if res.get(p)]
+    for spec in remote_server_specs():
+        try:
+            out.append(_describe_remote(spec))
+        except Exception as e:
+            out.append(dict(pid=None, remote=True, name=spec.get("name") or "",
+                            error=str(e), warnings=[]))
     return sorted(out, key=lambda s: (not s.get("managed"), str(s.get("port"))))
 
 
@@ -913,6 +1001,7 @@ def _nouveau_vram_used(pci):
         return None
     try:
         # DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_GETPARAM, {u64 param; u64 value})
+        import fcntl
         req = (3 << 30) | (16 << 16) | (ord("d") << 8) | 0x40
         buf = fcntl.ioctl(fd, req, struct.pack("QQ", 19, 0))   # NOUVEAU_GETPARAM_VRAM_USED
         return struct.unpack("QQ", buf)[1] // 1048576
@@ -4719,7 +4808,8 @@ def start_server():
             ok, msg = _systemctl("start", inst)
             return ok, ("starting via systemd --user" if ok else f"systemctl --user failed: {msg}")
         LOGS.mkdir(exist_ok=True)
-        subprocess.Popen(["/usr/bin/python3", str(PANEL / "instance_launch.py"), inst["id"]],
+        py = sys.executable if hostos.IS_WIN else "/usr/bin/python3"
+        subprocess.Popen([py, str(PANEL / "instance_launch.py"), inst["id"]],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          cwd=str(LLAMA), start_new_session=True)
         return True, ("starting by direct launch - no systemd --user bus, so it dies with "
@@ -4750,17 +4840,18 @@ def stop_server():
         return False, "not running"
     # Signal THIS instance's process only. The old 'pkill -x llama-server'
     # would have taken down every instance on the box.
-    if INST()["legacy"]:
-        subprocess.run(["pkill", "-f", "run_qwen38_vulkan_inf01"], capture_output=True)
-    else:
-        subprocess.run(["pkill", "-f", f"instance_launch.py {INST()['id']}$"], capture_output=True)
+    if not hostos.IS_WIN:
+        if INST()["legacy"]:
+            subprocess.run(["pkill", "-f", "run_qwen38_vulkan_inf01"], capture_output=True)
+        else:
+            subprocess.run(["pkill", "-f", f"instance_launch.py {INST()['id']}$"], capture_output=True)
     try:
         os.kill(pid, signal.SIGTERM)
     except OSError:
         pass
     for _ in range(30):
         _pid_cache.pop(INST()["id"], None)
-        if not os.path.exists(f"/proc/{pid}"):
+        if not hostos.pid_alive(pid):
             return True, "stopped"
         time.sleep(1)
     try:
@@ -6400,6 +6491,12 @@ def _vk_matches(dev, name):
 
 
 def gpu_devices(probe=True):
+    if hostos.IS_WIN:
+        found = hostos.win_gpus()
+        found.append(dict(pci="cpu", vendor="cpu", driver=None, name="CPU only (no GPU)",
+                          vram_total_mib=0, backends=["cpu"], cuda_ready=False, usable=True,
+                          notes=[]))
+        return found
     out = []
     try:
         pdevs = sorted(Path("/sys/bus/pci/devices").iterdir())
@@ -6925,6 +7022,8 @@ WantedBy=default.target
 
 
 def _user_env():
+    if hostos.IS_WIN:
+        return dict(os.environ)
     rt = f"/run/user/{os.getuid()}"
     return dict(os.environ, XDG_RUNTIME_DIR=rt, DBUS_SESSION_BUS_ADDRESS=f"unix:path={rt}/bus")
 
@@ -6932,6 +7031,9 @@ def _user_env():
 def user_manager():
     """Is there a systemd --user manager the panel can talk to, and will it
     survive logout / come up at boot (linger)?"""
+    if hostos.IS_WIN:
+        return dict(bus=False, linger=False,
+                    fix="Windows starts instances directly; there is no systemd user bus")
     bus = os.path.exists(f"/run/user/{os.getuid()}/bus")
     linger = os.path.exists(f"/var/lib/systemd/linger/{os.environ.get('USER') or 'smbadmin'}") \
         or os.path.exists("/var/lib/systemd/linger/smbadmin")
@@ -6940,6 +7042,8 @@ def user_manager():
 
 
 def ensure_user_unit():
+    if hostos.IS_WIN:
+        return False
     f = USER_UNIT_DIR / USER_UNIT
     if f.exists() and f.read_text() == USER_UNIT_TEXT:
         return False
@@ -7575,7 +7679,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._send(dict(error=str(e)), 404)
         try:
             if p in ("/", "/index.html"):
-                return self._send((PANEL / "static/index.html").read_text(),
+                return self._send((CODE / "static/index.html").read_text(encoding="utf-8"),
                                   ctype="text/html; charset=utf-8")
             if INST().get("engine") in GEN_ENGINES and p in _LLAMA_ONLY_GET:
                 return self._send(dict(na=True, error=f"not used by {INST()['engine']} "

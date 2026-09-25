@@ -11,6 +11,7 @@ The MCP block is read-only by default (LEXIPANEL_MCP_READONLY=1): an agent that 
 logs and measurements needs no start/stop/restart tools until you decide it does.
 """
 import os
+from pathlib import Path
 
 P = None
 MIN_CTX = 64000
@@ -66,7 +67,7 @@ def setup(inst, host_header=None):
         f"listening on {bind_host} only: Hermes must run on this machine (HOST=0.0.0.0 to reach it from another)")
     auth = bool(str(p.get("API_KEY") or ""))
     home = str(P.HOME)
-    mcp_path = f"{P.PANEL}/mcp_server.py"
+    mcp_path = f"{Path(P.PANEL).as_posix()}/mcp_server.py"
     user = os.path.basename(home.rstrip("/")) or "admin"
     ctx_line = f"  context_length: {min(slot_ctx, 1_000_000)}\n" if slot_ctx else ""
     yaml = ("# ~/.hermes/config.yaml  (then /reload-mcp, or restart hermes)\n"
