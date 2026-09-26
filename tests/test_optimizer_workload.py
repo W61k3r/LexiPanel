@@ -87,6 +87,22 @@ class SpeedTrials(unittest.TestCase):
         self.assertEqual(c["speed_basis"], "workload")
         self.assertGreater(c["speed_ratio"], 1.05)                   # 10 % at depth, not diluted
 
+    def test_speed_candidate_scored_on_the_baselines_basis(self):
+        # Standard/Thorough budgets measure the baseline's agreement over repeats; a speed-only
+        # candidate runs the sanity tasks once. Same speed, same quality -> the same score.
+        O._run_tasks = lambda run, cand, eff, which, reps: dict(
+            quality=0.9, agreement=None if which == "sanity" else 0.8, suite_s=10.0, tasks={})
+        run = run_with(None, phases=("launch",))
+        base = O._new_cand(run, "baseline (current saved settings)", "baseline")
+        O._evaluate(run, base, "full")
+        run["baseline_metrics"] = base["metrics"]
+        run["baseline_sanity"] = 0.9
+        base.update(O._score(run, base["metrics"], base["metrics"]))
+        c = O._new_cand(run, "THREADS=8", "launch", launch=dict(THREADS="8"))    # no speed effect
+        O._evaluate(run, c, "speed")
+        self.assertEqual(c["metrics"]["agreement"], 0.8)
+        self.assertAlmostEqual(c["score"], base["score"], places=9)
+
     def test_no_workload_no_extra_measurements(self):
         run = run_with(None, phases=("launch",))
         c = O._new_cand(run, "UBATCH=1024", "launch", launch=dict(UBATCH="1024"))

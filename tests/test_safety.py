@@ -168,6 +168,28 @@ class Tripwires(unittest.TestCase):
             self.assertRegex(src, rf'verb (== |in \([^)]*)"{v}"', f"the helper does not dispatch {v}")
 
 
+class FleetDirection(unittest.TestCase):
+    """The primary never connects to a member: every request fleet code makes is a member posting
+    to its primary's join, report or event route (remote actions ride back in the replies)."""
+    ALLOWED = {"/api/fleet/join", "/api/fleet/report", "/api/fleet/event"}
+
+    def test_fleet_only_posts_to_the_primarys_member_routes(self):
+        tree = ast.parse((ROOT / "fleet.py").read_text())
+        paths, calls = set(), 0
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_post":
+                calls += 1
+                url = ast.unparse(n.args[0])
+                self.assertTrue(url.startswith("c['primary_url'] + "), url)
+                paths |= {s.value for s in ast.walk(n.args[0]) if isinstance(s, ast.Constant) and isinstance(s.value, str)
+                          and s.value.startswith("/")}
+            if isinstance(n, ast.Attribute) and n.attr in ("urlopen", "HTTPConnection", "HTTPSConnection", "create_connection"):
+                self.assertTrue(any(isinstance(f, ast.FunctionDef) and f.name == "_post" and n in ast.walk(f)
+                                    for f in ast.walk(tree)), f"a connection outside _post: {ast.unparse(n)}")
+        self.assertGreaterEqual(calls, 3)
+        self.assertEqual(paths, self.ALLOWED)
+
+
 class DangerousValues(unittest.TestCase):
     """The helper, not the UI, is the last line: it refuses these whatever the kernel prints."""
     def setUp(self):

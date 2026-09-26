@@ -319,6 +319,29 @@ class Loop(Base):
         self.assertEqual(A.load("main")["rejected"], {"UBATCH=1024": self.fp})
         self.assertEqual(len(A.load("main")["experiments"]), 1)   # nothing new starts before the restart
 
+    def test_safe_restart_that_recovers_rejects_the_change(self):
+        # with restarts.py present, a new setting that fails the restart check (fallback tier,
+        # canary) is put back by the procedure; auto-fit records why and never retries it
+        import types
+        calls = []
+        self.P.restarts = types.SimpleNamespace(
+            snapshot_for=lambda inst, tag: calls.append(("snap", tag)) or f"/snap/{tag}",
+            restart=lambda inst, reason, by, known_good: calls.append(("restart", reason, known_good)) or dict(
+                id="r1", outcome="recovered", detail="not running the intended settings (a fallback tier?)"))
+        self.seed(120, decode=40.0, depth=lambda i: 20000)
+        self.quiet(60); self.running()
+        self.O._run = None
+        self.O.runs["run0"] = run_record(dict(UBATCH="1024"))
+        A.tick_one(self.inst, self.now)
+        e = A._find(A.load("main"), "x1")
+        self.assertEqual(calls[0], ("snap", "autofit-x1-apply"))
+        self.assertEqual(calls[1], ("restart", "auto-fit apply", "/snap/autofit-x1-apply"))
+        self.assertEqual(len(A.load("main")["experiments"]), 1)   # cooling down: nothing new starts
+        self.assertNotIn("pending_restart", e)
+        self.assertIn("failed the restart check", e["restart_error"])
+        self.assertEqual(e["verify"]["state"], "inconclusive")
+        self.assertEqual(A.load("main")["rejected"], {"UBATCH=1024": self.fp})
+
     def test_a_faster_change_is_confirmed(self):
         self.seed(120, decode=40.0, depth=lambda i: 20000)
         st = self.st(mode="auto")
@@ -334,6 +357,63 @@ class Loop(Base):
         A.tick_one(self.inst, self.now + 600)
         self.assertEqual(A.load("main")["experiments"][-1]["verify"]["state"], "confirmed")
         self.assertEqual(self.O.rolled, [])
+
+    def _pending(self, new_fp):
+        st = self.st(mode="auto")
+        st["experiments"].append(dict(id="x1", kind="tune", state="done", decision="applied", label="UBATCH=1024",
+                                      run_id="run0", fp_before=self.fp, fp_after=new_fp, applied_at=int(self.now),
+                                      restarted_at=int(self.now), gain=0.04, verify=dict(state="pending")))
+        A.save("main", st)
+
+    def _traffic(self, fp, t0, n, acc_mean, speed, seed):
+        import math, random
+        rng = random.Random(seed)
+        with open(W._dir("main") / "requests.jsonl", "a") as f:
+            for i in range(n):
+                acc = min(0.97, max(0.4, rng.gauss(acc_mean, 0.06)))
+                depth = 20000 + (i % 3) * 30000
+                tps = 45 * (1 - depth / 400000) * speed * math.exp(0.82 * (acc - 0.85) + rng.gauss(0, 0.012))
+                f.write(json.dumps(dict(t=int(t0 + i), depth=depth, eval_tokens=200, decode_tps=round(tps, 3),
+                                        accept=round(acc, 4), fp=fp)) + "\n")
+        W._env_cache.clear(); W._find_cache.clear()
+
+    def test_less_predictable_traffic_is_not_a_regression(self):
+        # Same engine speed; after the change the agent works on text the draft head predicts
+        # less well (acceptance 0.85 -> 0.70). Raw decode drops ~12 % - the old ratio rule
+        # (< 0.93) rolled this back. Adjusted for acceptance there is nothing to see.
+        new_fp = "f" * 12
+        self._traffic(self.fp, self.now - 5 * DAY, 150, 0.85, 1.0, 1)
+        self._pending(new_fp)
+        self._traffic(new_fp, self.now + 10, 150, 0.70, 1.0, 2)
+        A.tick_one(self.inst, self.now + 600)
+        v = A.load("main")["experiments"][-1]["verify"]
+        self.assertLess(v["ratio"], 0.93)                          # what the old rule saw
+        self.assertEqual(v["state"], "confirmed", v)
+        self.assertTrue(v["effect"]["adjusted"])
+        self.assertLess(abs(v["effect"]["pct"]), 2.0)
+        self.assertEqual(self.O.rolled, [])
+
+    def test_a_small_real_regression_is_caught(self):
+        # 4 % slower for real: inside the old rule's 7 % blind spot, but outside the interval.
+        new_fp = "e" * 12
+        self._traffic(self.fp, self.now - 5 * DAY, 150, 0.85, 1.0, 3)
+        self._pending(new_fp)
+        self._traffic(new_fp, self.now + 10, 150, 0.85, 0.96, 4)
+        A.tick_one(self.inst, self.now + 600)
+        e = A._find(A.load("main"), "x1")
+        self.assertGreater(e["verify"]["ratio"], 0.93)            # the old rule would confirm it
+        self.assertEqual(e["verify"]["state"], "regressed", e["verify"])
+        self.assertEqual(self.O.rolled, ["run0"])
+
+    def test_waits_for_the_requests_it_needs(self):
+        new_fp = "d" * 12
+        self._traffic(self.fp, self.now - 5 * DAY, 150, 0.85, 1.0, 5)
+        self._pending(new_fp)
+        self._traffic(new_fp, self.now + 10, 5, 0.85, 1.0, 6)     # far too few
+        A.tick_one(self.inst, self.now + 600)
+        v = A.load("main")["experiments"][-1]["verify"]
+        self.assertEqual(v["state"], "pending")
+        self.assertGreaterEqual(v["need"], 20)
 
     def test_proposal_apply_and_dismiss(self):
         st = self.st(mode="propose")

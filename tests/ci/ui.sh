@@ -8,7 +8,7 @@ export NODE_PATH="$ui/node_modules${NODE_PATH:+:$NODE_PATH}"
 command -v node >/dev/null || { echo "SKIP ui checks: node is not installed"; exit 2; }
 node -e "require('playwright'); require('jsdom')" 2>/dev/null || {
     echo "SKIP ui checks: run  cd tests/ui && npm install && npx playwright install chromium"; exit 2; }
-mkdir -p /home/smbadmin/llama /home/smbadmin/models /home/smbadmin/llama_logs 2>/dev/null || true
+h=${LEXIPANEL_HOME:-$HOME}; mkdir -p "$h/llama" "$h/models" "$h/llama_logs" 2>/dev/null || true
 p1=${UI_PORT:-18190}; p2=$((p1 + 1)); fail=0
 step() { echo; echo "== $1"; }
 trap '"$ui/serve.sh" stop $p1; "$ui/serve.sh" stop $p2' EXIT
