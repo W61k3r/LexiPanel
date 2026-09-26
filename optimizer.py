@@ -777,6 +777,12 @@ def _evaluate(run, cand, mode):
                                 else round((base.get("quality") or 0) * q["quality"] /
                                            max(base_sanity, 1e-9), 4))
                 q["quality_basis"] = "assumed from baseline; sanity tasks checked"
+                # Consistency on the baseline's basis too: one sanity pass cannot measure how
+                # often answers repeat, so without this a speed candidate was scored on decode
+                # stability alone against a baseline scored on 0.6 agreement + 0.4 stability,
+                # a bias of up to ~0.02 score that had nothing to do with the knob.
+                if base.get("agreement") is not None:
+                    q["agreement"] = base["agreement"]
         m.update(q)
         th = cand.get("thermal") or {}
         if th.get("power"):
@@ -1196,6 +1202,8 @@ def start(iid, body):
             raise ValueError(f"an optimizer run is already active on '{_run['instance']}'")
         if getattr(P, "gputune", None) and P.gputune.busy():
             raise ValueError("a GPU Tuning benchmark is running; wait for it or stop it")
+        if getattr(getattr(P, "benchlab", None), "active", lambda: False)():
+            raise ValueError("a Bench run is active; wait for it or stop it")
         inst = P.get_instance(iid)
         with P.using_instance(inst):
             if not P.server_pid():

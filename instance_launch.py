@@ -257,6 +257,9 @@ def run_sd(inst, dry):
         for k in [k for k in env if k.startswith(("GGML_", "VK_", "CUDA_", "HIP_", "ROCR_", "HSA_"))]:
             env.pop(k)
         env.update(plan["env"])
+        mod = P.GEN_ENGINES.get(engine)             # secrets (e.g. VLLM_API_KEY): to the process only -
+        if hasattr(mod, "secrets"):                  # never in the plan, the API or the log above
+            env.update(mod.secrets(inst))
         child = subprocess.Popen(plan["argv"], env=env, stdout=subprocess.PIPE,
                                  stderr=subprocess.STDOUT, cwd=str(rundir))
         say(out, f"{srv} pid {child.pid}")

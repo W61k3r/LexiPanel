@@ -5,27 +5,42 @@ testing changes in idle windows, verifying each against the live requests that f
 rolling back regressions on its own. One self-hosted control plane for llama.cpp, image, audio
 and NPU engines, with GPU tuning, guard rails and MCP control.**
 
-Chat and coding LLMs with [llama.cpp](https://github.com/ggml-org/llama.cpp), images with
+Chat and coding LLMs with [llama.cpp](https://github.com/ggml-org/llama.cpp), many requests at once with
+[vLLM](https://github.com/vllm-project/vllm), images with
 [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp), speech / music / sound
 with [audio.cpp](https://github.com/0xShug0/audio.cpp), GGUF chat with
 [Camelid](https://github.com/timtoole02/Camelid), and ONNX models on the CPU or an NPU (AMD
 Ryzen AI, Intel, Qualcomm) with [ONNX Runtime](https://onnxruntime.ai/), all from one browser
-tab. **Version 1.0.0**: what is in it, and what is verified, in [CHANGELOG.md](CHANGELOG.md).
+tab. **Version 1.0.1**: what changed since 1.0.0, and what is verified, in [CHANGELOG.md](CHANGELOG.md).
 
 ![python](https://img.shields.io/badge/python-3.12%2B%20stdlib%20only-3776AB)
-![engines](https://img.shields.io/badge/engines-llama.cpp%20%C2%B7%20sd.cpp%20%C2%B7%20audio.cpp%20%C2%B7%20Camelid%20%C2%B7%20ONNX%20Runtime-6f42c1)
+![engines](https://img.shields.io/badge/engines-llama.cpp%20%C2%B7%20vLLM%20%C2%B7%20sd.cpp%20%C2%B7%20audio.cpp%20%C2%B7%20Camelid%20%C2%B7%20ONNX%20Runtime-6f42c1)
 ![gpu](https://img.shields.io/badge/GPU%20%2F%20NPU-Vulkan%20%C2%B7%20ROCm%20%C2%B7%20CUDA%20%C2%B7%20Ryzen%20AI%20%C2%B7%20OpenVINO%20%C2%B7%20QNN%20%C2%B7%20CPU-d29922)
 ![deps](https://img.shields.io/badge/pip%20deps-none-3fb950)
-![version](https://img.shields.io/badge/version-1.0.0-blue)
+![version](https://img.shields.io/badge/version-1.0.1-blue)
 
 It grew out of running a 27B model at 131k–262k context on a single Radeon 7900 XTX, and
 almost every feature exists because something broke without it. It is a **stdlib-only Python
 server with zero pip dependencies**, a single-page UI, and systemd units — no Docker, no
 database, no build step.
 
-> **Heads-up:** this is a working copy of one real machine's panel, cleaned for sharing. It
-> assumes a user called `admin` with everything under `/home/admin`. Read
+> **Heads-up:** this is a working copy of one real machine's panel, cleaned for sharing. The panel
+> itself runs as whoever starts it, but the installers, systemd units and examples are still
+> written for a user called `admin` with everything under `/home/admin`. Read
 > [Adapting it to your box](#adapting-it-to-your-box) before installing.
+
+### New in 1.0.1
+
+- **Many requests at once, without failures.** The gateway queues requests by free slots and, for
+  llama.cpp's shared KV pool, by free KV tokens: on an RTX 2060 the same 48-request burst went
+  from 0 of 48 served (straight to llama-server) to 48 of 48 (through the gateway).
+  [Gateway queue and batch jobs](#gateway-queue-and-batch-jobs) · [vLLM](#vllm-many-requests-at-once)
+- **Measurements you can trust**: the [Bench](#bench-measurements-with-intervals) tab reports
+  every speed with an interval and a verdict, and checks its own false-win rate.
+- **Restarts that land or roll back**: [Safe restarts](#safe-restarts) verify the new settings
+  and put the last good ones back when they fail, including when the server never comes up.
+- **More than one machine**: [Remote endpoints](#remote-endpoints) by address, and
+  [Fleet](#fleet-many-boxes-one-primary) remote actions: signed, opt-in per box, audited.
 
 ---
 
@@ -43,6 +58,11 @@ database, no build step.
 - [Workload and auto-fit](#workload-and-auto-fit)
 - [Fit: hardware-fitted requants](#fit-hardware-fitted-requants)
 - [GPU Tuning](#gpu-tuning)
+- [Bench: measurements with intervals](#bench-measurements-with-intervals)
+- [Safe restarts](#safe-restarts)
+- [Remote endpoints](#remote-endpoints)
+- [vLLM: many requests at once](#vllm-many-requests-at-once)
+- [Gateway queue and batch jobs](#gateway-queue-and-batch-jobs)
 - [Gateway and quotas](#gateway-and-quotas)
 - [Access: single-user or multi-user](#access-single-user-or-multi-user)
 - [Fleet: many boxes, one primary](#fleet-many-boxes-one-primary)
@@ -226,6 +246,7 @@ people / agents / applications
 | **Status** | All running servers, lifecycle controls, instance switcher, throughput/live decode, depth curve and profiles. Image/audio instances get task-specific run cards. llama.cpp instances get Hermes readiness/config. |
 | **Parameters** | Grouped settings with tooltips, backend/device selection, memory calculator, RAM budget, fallback tiers and model profiles. ONNX instances get provider + generation controls. |
 | **Optimize** | Coding/agent suites, candidate sweeps, model comparisons, workload-weighted runs, thermal/abort limits, apply/rollback. |
+| **Bench** | Measurements with intervals: traffic noise and a verdict per configuration change, profile, A/A calibration with a self-test of the platform's own error rates, A/B compare that stops when the answer is clear, and concurrency goodput. |
 | **Workload** | Real traffic depth, prompt/output size, concurrency, draft acceptance, busy/idle heatmap, findings and Auto-fit experiments/proposals/history. |
 | **Fleet** | Standalone/primary/member role; box health and reported hardware/instances on the primary; join/share controls on members. |
 | **Access** | Mode, users, roles, API keys and the tamper-evident audit tail/chain check. |
@@ -398,7 +419,7 @@ Auto-fit starts only under its configured safety conditions: instance healthy, n
 
 A real request arriving interrupts the experiment and returns the instance to its saved settings after that request. Capacity-changing decisions such as context/parallelism remain proposals. Automatic application is restricted to an allowlist of speed-oriented keys (`UBATCH`, `BATCH`, `CACHE_REUSE`, `SPEC_N_MAX`, `SPEC_P_MIN`, `THREADS`) and requires at least the configured **3%** typical-request gain plus non-regressed task quality. Changes to capacity or behavior such as context, slot count, or speculation on/off remain proposals.
 
-After application, later real requests are compared with up to 14 days of pre-change traffic at matched depth bands. At **20 matched requests**, under **93%** of prior matched-depth decode is a regression: auto mode rolls it back and will not auto-apply that change again on that configuration. Too little traffic after seven days is inconclusive. A rollback leaves alone settings changed by hand since the experiment.
+After application, later real requests are compared with up to 14 days of pre-change traffic: log decode is modelled on depth band plus MTP draft acceptance (when every request reports it), so a change is judged on the engine, not on how predictable the text happened to be. How many requests to wait for is fixed once, from the pre-change noise and the claimed gain (at least 20, at most 400), and the verdict is taken at that single look. If the whole 95 % interval says slower, it is a regression: auto mode rolls it back and will not auto-apply that change again on that configuration. Otherwise it is confirmed, with the measured change and its interval. Too little traffic after seven days is inconclusive. A rollback leaves alone settings changed by hand since the experiment. (Before Bench, the rule was a median ratio under 93 % at 20 requests: blind below about 7 %, and fooled by less predictable text.)
 
 Run the included stand-in end-to-end test to watch the logic without a GPU or your real configuration:
 
@@ -440,6 +461,188 @@ Results include decode, cold prefill, run-to-run spread, power, peak thermals an
 On supported AMD hardware, **Apply and test** changes values, runs the benchmark and restores the prior values if the run fails, the model server dies, a reset is seen or a thermal limit trips. Proven profiles can later become the boot profile applied before inference services start.
 
 VBIOS support is intentionally read/check-only: back up the image, inspect a candidate ROM and print the vendor utility command. LexiPanel does **not** flash firmware.
+
+---
+
+## Bench: measurements with intervals
+
+The Bench tab answers one question well: **is this difference real?** Every number carries a
+95 % interval, and every comparison ends in a verdict:
+
+| Verdict | Meaning |
+|---|---|
+| **better** / **worse** | the whole interval is on one side of zero and the estimate reaches your margin (2 % by default) |
+| **small** | a real difference, smaller than the margin: not worth acting on |
+| **same** | the whole interval sits inside ±margin: equivalent for practical purposes |
+| **undecided** | no detectable difference at the precision reached, which is reported |
+
+What makes the numbers trustworthy:
+
+- **Speed is measured where noise can't get in.** Temperature 0, a fixed seed and fixed code
+  text give the same tokens on every run, so MTP draft acceptance cannot change between runs.
+  On the reference box acceptance explained about 99 % of run-to-run decode noise (7.6 %
+  down to 0.6 %), so three paired runs detect a 2 % change that would otherwise need over a
+  hundred.
+- **Where the workload lives.** Decode is measured at the depths real requests reach (the
+  Workload tab's depth mix), plus a *turn* probe: the typical new prompt appended to a cached
+  deep context. The headline metric is the time a typical request of this workload takes.
+- **Comparisons alternate A-B-B-A** so heat and drift hit both sides, pair the measurements,
+  and stop at pre-registered looks (3, 5, 8 pairs) as soon as the answer is clear. Each look
+  spends a share of the 5 % false-win budget, so stopping early cannot inflate it.
+- **The platform measures itself.** *Calibrate* runs the saved settings against themselves,
+  then replays the decision rule thousands of times on that noise: the false-win rate (must
+  stay within 5 %) and the smallest difference found at least 80 % of the time.
+- **Real traffic comes first.** A request that queues behind a Bench request
+  (llama-server's `requests_deferred`) cancels it at once; the block is measured again when the
+  server is quiet. Bench traffic is tagged so the Workload profile never learns from it.
+
+Kinds: **traffic** (no GPU: request-to-request noise, raw and adjusted for acceptance, the
+requests per side needed to see a 1-5 % change, and a verdict with an interval for every
+configuration change in the history), **profile** (the running server, no restart),
+**calibrate** (A/A; optionally restarting between blocks for the honest between-restart
+figure), **compare** (A/B against `KEY=value` overrides; restarts for every switch, snapshots
+and restores the saved files, ends on the saved settings) and **goodput** (1..N simultaneous
+turns on warmed contexts: throughput, per-stream decode, first-token time and how many met
+the target).
+
+Safety: nothing here changes GPU, power or firmware settings; restarting runs need explicit
+consent; a comparison refuses `PORT`, `HOST`, `BACKEND`, `SPEC_DRAFT_MODEL` and `MMPROJ`
+changes and anything the memory estimator says will not fit; Bench and the other measuring
+jobs (optimizer, depth curve, GPU Tuning, refusal check, Fit) never overlap; a panel restart
+mid-run puts the saved files back. The statistics live in `benchstats.py`, standard library
+only, with unit tests against published tables; `tests/test_benchlab.py` runs every kind end
+to end against a fake llama-server.
+
+---
+
+## Safe restarts
+
+A configuration change only matters once the server restarts on it, and that is where things
+fail silently: the launcher falls back to a safer tier, a new build or driver starts but answers
+wrongly, or an agent pinned to the box loses its context. Every planned restart (auto-fit apply
+and rollback, and **Safe restart** on the Status tab) therefore runs one journaled procedure in
+`restarts.py`:
+
+1. **Journal.** The intent (who, why, the settings the server must run afterwards and the
+   known-good snapshot to fall back to) is written before anything changes. If the panel dies
+   mid-restart, the next start finishes the same decision: nothing touched yet means aborted;
+   otherwise the server is verified against the journal and the known-good put back if needed.
+2. **Drain.** The gateway holds new requests for the instance (`hold_s`, default 120 s) instead
+   of failing them, and the restart waits for requests in flight or queued (`drain_s`). Clients
+   on the engine port directly can only be waited for; point them at the gateway (`/v1` on the
+   panel) and they never see the restart.
+3. **KV handoff** (experimental, off by default). When the cache layout does not change (same
+   binary, model file, cache types, context, slots, flash attention), each slot's KV cache is
+   saved before the restart and restored after it, so an agent at 150k tokens of context does
+   not spend minutes re-reading it. The file holds conversation tokens: it lives in the server's
+   `--slot-save-path`, is made 0600 immediately and deleted after use or on crash recovery.
+4. **Verify.** The server must be healthy, running exactly the intended settings (a fallback
+   tier fails this check) and pass a canary: a fixed prompt at temperature 0 whose output is
+   compared with the one recorded on this exact configuration fingerprint. A fingerprint is only
+   enforced once it has reproduced across a restart, so a build whose output is not reproducible
+   is reported, never "recovered" in a loop.
+5. **Recover.** A failed check restores the known-good snapshot (the one taken before the change,
+   or the last configuration that verified), restarts once more and verifies again. If that fails
+   too, the restart ends as **failed** and says why; it never loops. Auto-fit records the reason,
+   never auto-applies that change again, and pauses its experiments for six hours.
+6. **Report.** Every restart is a record (timeline, downtime, drain time, requests held and
+   timed out, canary result, context kept) and a line in the hash-chained audit log with the
+   authenticated caller. The Status tab shows a 30-day summary (restarts, outcomes, silent failures
+   caught, median downtime); `/api/restarts/export` gives CSV.
+
+One restart per instance at a time; nothing here touches GPU, power or firmware settings.
+`tests/test_restarts.py` covers each path against a fake server that can fall back to a safe
+tier, go silently wrong, and save and restore slots.
+
+---
+
+## Remote endpoints
+
+The server list finds local servers by process, which can never see another machine. Remote
+endpoints fill that gap: register any model server by address on the Status tab (another
+box's llama-server, vLLM, Ollama, LM Studio, or any OpenAI-compatible API) and it appears in
+the list with its health, model, context, busy slots or running/waiting requests and live
+generation rate, asked every few seconds from `/health`, `/v1/models`, `/props`, `/slots` and
+`/metrics`. Tick *through the gateway* and it is also served at `/v1` on this panel, under its
+name and its model names, with its own API key sent only to it.
+
+Registering is admin-only; the address is `http(s)://host:port` and nothing else; link-local
+(cloud metadata), multicast, unspecified and reserved addresses are refused and checked again
+at every poll; redirects are never followed; answers are capped and time out in 3 s; the
+status view never waits on a slow endpoint; keys are stored readable only by the panel and
+never returned. `tests/test_remotes.py` covers each rule against fake llama.cpp, vLLM and
+redirecting servers, and a request routed through the gateway to a remote.
+
+---
+
+## vLLM: many requests at once
+
+llama.cpp is at its best serving one or a few conversations: each slot owns a contiguous KV
+region. When many requests of different lengths are in flight at once, vLLM is the better
+engine: PagedAttention hands the KV cache out in small blocks as sequences grow (and shares the
+blocks of a common prefix), and its scheduler batches every running request into each step.
+LexiPanel runs both, side by side, as ordinary instances.
+
+- **Install:** `bash install-vllm.sh` (NVIDIA, Python 3.10-3.13) or `bash install-vllm.sh --rocm`
+  (AMD, Python 3.12). vLLM lives in its own venv under `~/vllm`, never the system Python.
+- **Instance:** New instance → engine *vLLM* → one NVIDIA or AMD card. Settings (`VL_*`): model (a
+  Hugging Face folder or repo id), card memory share, context per request, requests at once,
+  tokens per step, KV cache type, prefix caching, eager mode, tensor parallel, extra options.
+- **Guard rails:** the plan refuses a card another server uses (vLLM takes its memory share at
+  start), a LAN listener without an API key, and options that would override the ones LexiPanel
+  sets or reach outside (`--api-key`, `--host`, SSL files, local media paths). `--trust-remote-code`
+  is a separate, off-by-default switch. The API key reaches the server through the launcher's
+  secret environment: never on the command line (visible in `/proc`), in `params.env` or in the
+  launch log. vLLM's usage reporting is switched off (`VLLM_NO_USAGE_STATS`, `DO_NOT_TRACK`).
+- **Measure it:** Bench's *goodput* runs 1-32 simultaneous turns against either engine (vLLM
+  reports no per-request timings, so Bench times the stream itself: first token, then tokens over
+  first-to-last token time), which is how to decide which engine serves a workload.
+
+---
+
+## Gateway queue and batch jobs
+
+The gateway admits requests the way a production scheduler would: a server is never sent more
+requests at once than it has slots (llama.cpp parallel slots, vLLM's requests at once), the rest
+wait at the gateway, and **interactive requests always go before batch ones**. For a llama.cpp
+server whose slots share one KV pool (`--kv-unified`) it also admits by **KV tokens**, the job
+vLLM's scheduler does with its paged cache: a request goes when the tokens in flight plus its own
+(prompt estimate + `max_tokens`) fit in the pool with the ~1.7x headroom llama.cpp needs, and
+waits otherwise. Without that, an overfilled pool fails *every* request in flight.
+
+Same server, same load (RTX 2060, Qwen3-1.7B, 8192-token shared pool, 16 slots; 3 rounds of 16
+concurrent requests, ~300-token prompts, 128 tokens out):
+
+| | Requests OK | Tokens | Goodput | Latency p50 / max |
+|---|---|---|---|---|
+| straight to llama-server | **0 of 48** ("Context size has been exceeded") | 0 | 0 t/s | - |
+| through the gateway | **48 of 48** (24 waited 2.2 s on average for room) | 6,144 | 235 t/s | 7.8 / 9.1 s |
+
+The memory calculator plans the same thing ahead: for the instance's typical depth (the p90 of
+its logged requests) it shows how many conversations run safely with the current CTX, PARALLEL
+and KV layout, the CTX all slots need, and the most the card could hold with separate or shared KV.
+
+Background work goes in as a batch (`POST /v1/batches`, OpenAI's Batch API shape with the input
+inline): it runs at batch priority, so live users are never kept waiting behind it, and the
+results download as JSONL. Batches survive a panel restart (resuming exactly the requests with
+no result yet), count against the submitter's quotas, are visible only to their owner, and are
+deleted seven days after they finish. The Workload tab shows each server's queue and the batch
+jobs; `tests/test_admission_batches.py` checks that a 2-slot server never holds a third request,
+that interactive requests overtake queued batch ones, and each batch path.
+
+Measured on the RTX 2060 (Qwen3-1.7B float16, 256 + 64 context tokens, 128 out, target: first
+token within 2 s and 20 t/s per stream):
+
+| Streams | llama.cpp (16 slots, 12k shared KV) | vLLM (6.7k paged KV) |
+|---|---|---|
+| 1 | 77 t/s, first token 0.02 s | 76 t/s, 0.03 s |
+| 8 | 379 t/s, 0.21 s | 366 t/s, 0.10 s |
+| 16 | 530 t/s, 0.39 s, 16/16 on target | 459 t/s, 0.17 s, 16/16 |
+| 32 | 457 t/s, worst first token 5.6 s, 16/32 | 406 t/s, worst 6.3 s, 16/32 |
+
+With enough memory the two engines deliver similar throughput on this small card; vLLM keeps
+first-token time lower under load and serves the same load in about half the KV memory, while
+llama.cpp needs headroom (it failed requests at 16 streams in an 8k pool).
 
 ---
 
@@ -486,7 +689,9 @@ Each box runs a full LexiPanel. One can be **primary** and others **members**.
 
 A member joins with a short-lived one-time code and receives its own token. It reports outward to the primary roughly once per minute. Reports contain machine/instance operational metadata such as GPUs/NPUs/RAM, engine/model/state/speed, workload counts, pending Auto-fit proposals and LexiPanel version — not prompts, instance secrets or API keys.
 
-The primary marks boxes online/stale/offline and can revoke a member. Normal control remains on each member's own panel; the fleet layer is not pretending to be a distributed shell.
+The primary marks boxes online/stale/offline and can revoke a member. Where a member allows it, the primary can also start, stop, safely restart and re-configure (model and sizing only) that member's instances, and drain a box out of the gateway. Each command is signed with a per-box key, runs once, is re-checked by the member's own guard rails (a settings change that does not verify is rolled back by the member) and is audited on both boxes. Commands ride back in the replies to the member's own reports, so members still open no port. It is not a distributed shell: no shell commands, no file transfer, no GPU or power changes.
+
+When a member restarts a shared instance on purpose, the primary's gateway sends that instance's requests to another replica, or holds them until it is back, instead of failing them.
 
 The shared-model gateway adds a useful middle ground before full distributed inference: one client endpoint can see models resident across several boxes and use simple replica failover/load selection.
 
@@ -547,7 +752,7 @@ how to rebuild or extend it without breaking the panel.
 
 The web UI is intentionally thin over a JSON API. The panel itself binds loopback (`127.0.0.1:8090`) and is intended to sit behind Caddy.
 
-The generated **[API.md](API.md)** is the authoritative route list and currently documents **173 routes** covering instance lifecycle/configuration, optimization, workload/Auto-fit, Fit, models/downloads/templates, engines/builds, image/audio/Camelid/ONNX functions, files, GPU/power/tuning, access, gateway, fleet, Hermes, MCP, diagnostics/crashes/logs and backups.
+The generated **[API.md](API.md)** is the authoritative route list and currently documents **229 routes** covering instance lifecycle/configuration, optimization, workload/Auto-fit, Fit, models/downloads/templates, engines/builds, image/audio/Camelid/ONNX functions, files, GPU/power/tuning, access, gateway, fleet, Hermes, MCP, diagnostics/crashes/logs and backups.
 
 Examples:
 
@@ -601,7 +806,11 @@ Current guard rails include:
 - MCP read-only mode and multi-user role inheritance;
 - API keys with scope-by-role/expiry;
 - hash-chained change audit;
-- safety tests that trip if code begins invoking firmware flashers, writes privileged sysfs outside the helper or broadens sudoers unexpectedly.
+- safety tests that trip if code begins invoking firmware flashers, writes privileged sysfs outside the helper or broadens sudoers unexpectedly;
+- secrets (instance API keys, remote endpoint keys, fleet tokens and action keys) stored 0600 and never put on a command line, in a launch plan, a report or a log;
+- remote endpoints refuse link-local, cloud-metadata, multicast and reserved addresses (re-checked on every poll), follow no redirects and cap response size;
+- fleet: the primary never connects to a member; member commands are HMAC-signed with a per-box key sent once, single-use, expiring, allowlisted on the member (nothing by default) and never a shell command or file transfer; a tripwire test fails the build if fleet code makes any other request;
+- batch jobs are visible only to their owner, stored 0600 and deleted after seven days.
 
 This is still self-hosted software with a browser terminal and privileged optional hardware controls. Read the code and threat model before exposing it beyond the network/users you intend.
 
@@ -619,7 +828,7 @@ Treat macOS as experimental until exercised and reported by actual Apple Silicon
 
 The remaining “real machine” assumptions are intentionally documented rather than hidden behind a generic installer:
 
-- **User/paths:** the original layout is `admin` under `/home/admin/{panel,llama,models,sdcpp,audiocpp,...}`. Search the repo for `/home/admin` before deploying under another account/layout.
+- **User/paths:** `panel.py` takes the account and home folder from the process that runs it (`LEXIPANEL_HOME` overrides the home). The installers, systemd units and examples still use `admin` under `/home/admin/{panel,llama,models,sdcpp,audiocpp,...}`: search the repo for `/home/admin` before deploying under another account/layout.
 - **Legacy `main`:** the historical launch scripts were written around the original Qwen/AMD setup. You can repoint them or ignore `main` and use ordinary instances.
 - **Hardware:** AMD is the deepest Linux implementation because that is the machine the project came from. NVIDIA is supported through its available management/runtime paths. Multi-GPU capabilities follow the underlying engine/backend rather than pretending every combination is equivalent.
 - **NPUs:** provider detection/configuration exists, but a provider only works when its vendor runtime and compatible hardware/model are actually present.
@@ -688,6 +897,13 @@ mcp_server.py          stdio + Streamable HTTP MCP tools
 optimizer.py           candidate/model benchmarking and workload-weighted optimization
 optimize_suite.py      coding/agent benchmark tasks
 depthcurve.py          decode-vs-context measurement with thermals
+benchlab.py            Bench: profile / calibrate / compare / goodput / traffic, real traffic first
+benchstats.py          Bench statistics: intervals, verdicts, sequential looks, self-test, traffic model
+restarts.py            safe restarts: journal, drain + gateway hold, KV handoff, verify, recover, report
+remotes.py             remote endpoints: servers on other machines, registered by address
+vllm_engine.py         vLLM instances: settings, launch plan, card guard, health (engine "vllm")
+install-vllm.sh        installs vLLM into ~/vllm/venv-cu (CUDA) or ~/vllm/venv-rocm (--rocm)
+batches.py             /v1/batches: background jobs at batch priority, JSONL results
 workload.py            real-request profile, activity envelope and findings
 autofit.py             idle experiments, proposal/apply, verification and rollback
 
@@ -775,7 +991,7 @@ The integration is the feature.
 The project is already broad enough. The highest-value work is increasingly about **maturity and generalization rather than adding random tabs**:
 
 - exercise the existing paths across more AMD, NVIDIA, Intel, Apple and NPU machines;
-- remove historical `/home/admin` assumptions from installation/state paths;
+- remove the remaining `/home/admin` assumptions from the installers and systemd units (`panel.py` no longer has them);
 - deepen engine/plugin abstraction so a new server can be added without teaching every panel subsystem about it;
 - add stronger optimizer search strategies while preserving workload-aware scoring and real-traffic verification;
 - make fleet routing/health more observable and continue the documented distributed/RPC experiments;

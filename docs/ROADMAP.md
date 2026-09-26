@@ -12,10 +12,11 @@
 ## Next
 
 1. **Quotas and usage on screen** (today API only: `POST /api/gateway/quota`, `GET /api/gateway`).
-2. **Deploy a model to the fleet** from the primary: pick the boxes that fit (free VRAM / RAM,
-   card, measured speed of that model x card), start it there, N replicas; drain a box before a
-   restart. Needs Fleet v2 remote actions: signed, opt-in per box, re-checked by the member's own
-   guard rails, audited on both sides. GPU and power changes stay local-only.
+2. **Deploy a model to the fleet** from the primary. *Built 2026-09-26*: Fleet v2 remote actions
+   (start, stop, safe restart, model and sizing changes with roll-back; signed, opt-in per box,
+   re-checked by the member's own guard rails, audited on both sides), drain, and restart holds
+   at the primary's gateway. *Next*: placement - pick the boxes that fit (free VRAM / RAM, card,
+   measured speed of that model x card) and start N replicas. GPU and power changes stay local-only.
 3. **Striping** a model too big for one box across several with llama.cpp RPC (`docs/FLEET.md`),
    measured before it is trusted.
 4. **Fleet views**: alerts from every box, the model x card fits table, hourly history.

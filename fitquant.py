@@ -1269,6 +1269,8 @@ def _start_job(kind, title, fn, **info):
     with _lock:
         if _job and not _job.get("_done"):
             raise ValueError(f"a Fit job is already running: {_job['title']}")
+        if kind in ("bench", "verify", "imatrix") and getattr(getattr(P, "benchlab", None), "active", lambda: False)():
+            raise ValueError("a Bench run is active; wait for it or stop it")
         if kind in ("bench", "verify", "imatrix"):
             try:
                 if (O.status().get("active") or {}).get("state") in ("running", "starting"):

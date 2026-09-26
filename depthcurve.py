@@ -321,6 +321,8 @@ def start(iid, body):
             raise ValueError("a GPU Tuning benchmark is running; wait for it or stop it")
     if (O.status().get("active") or {}).get("state") == "running":
         raise ValueError("the optimizer is running; it restarts the server underneath a curve")
+    if getattr(getattr(P, "benchlab", None), "active", lambda: False)():
+        raise ValueError("a Bench run is active; wait for it or stop it")
     inst = P.get_instance(iid)
     host, port, devices, argv = _target(inst)
     props = _json(host, port, "GET", "/props", timeout=10)

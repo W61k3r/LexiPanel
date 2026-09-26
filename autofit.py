@@ -39,6 +39,8 @@ Experiments
 """
 import json, os, re, threading, time
 
+import benchstats as S
+
 P = None
 O = None                    # optimizer
 W = None                    # workload
@@ -47,9 +49,11 @@ AUTO_SAFE = ("UBATCH", "BATCH", "CACHE_REUSE", "SPEC_N_MAX", "SPEC_P_MIN", "THRE
 DEFAULTS = dict(mode="off", window="learned", quiet_min=15, max_per_week=2, min_gain=0.03,
                 max_minutes=120, reshape=True, goal="agentic")
 VERIFY_MIN = 20             # real requests at matched depths before a verdict
+VERIFY_MAX = 400            # ... and never wait for more than this many after the change
 VERIFY_DAYS = 7
 RETUNE_DAYS = 30
 MAX_TRIES = 3               # failed or interrupted attempts per configuration and kind
+COOLDOWN_S = 6 * 3600      # after a restart check failed: no automatic experiment for this long
 # Findings whose candidate buys capacity, not speed: what it buys, for the proposal's text.
 CAPACITY = {"ctx_unused": "frees VRAM the context never used",
             "ctx_limit": "lets sessions run deeper before they are cut",
@@ -155,7 +159,7 @@ def _others_measuring():
     if O._run is not None:
         return "an optimizer run is active"
     for name, what in (("depthcurve", "a depth-curve run"), ("gputune", "a GPU benchmark"),
-                       ("refusals", "a refusal check")):
+                       ("refusals", "a refusal check"), ("benchlab", "a Bench run")):
         r = getattr(getattr(P, name, None), "_run", None)
         if r and not r.get("_done"):
             return f"{what} is running"
@@ -177,6 +181,8 @@ def can_start(inst, st, env, now, manual=False):
         return False, "a request is being served right now"
     if any(e.get("pending_restart") for e in st["experiments"]):
         return False, "a restart onto changed settings is still pending"
+    if now < (st.get("hold_until") or 0) and not manual:
+        return False, "cooling down: a restart check failed recently (see the experiment's restart error)"
     if any((e.get("verify") or {}).get("state") in ("waiting-restart", "pending") for e in st["experiments"]):
         return False, "the last change is still being verified on real traffic (one change at a time)"
     if manual:
@@ -391,17 +397,36 @@ def _decide_reshape(st, exp, r):
                outcome=f"proposal: {best['label']} ({why}; changes what the server can do, so you decide)")
 
 
+def _R():
+    """restarts.py when the panel has it: journaled, verified restarts with a known-good fallback."""
+    return getattr(P, "restarts", None)
+
+
+def _snap(inst, exp, kind):
+    R = _R()
+    try:
+        return R.snapshot_for(inst, f"autofit-{exp['id']}-{kind}") if R else None
+    except Exception:
+        return None
+
+
 def _apply(inst, st, exp, by, now):
+    snap = _snap(inst, exp, "apply")                      # the known-good, before anything changes
     res = O.apply(exp["run_id"], exp["cand_id"], "params")
     exp.update(decision="applied", applied_by=by, applied_at=int(now), applied=res.get("applied"),
                verify=dict(state="waiting-restart"),
-               pending_restart=dict(reason="apply", from_fp=exp.get("fp_before"), since=int(now), tries=0))
+               pending_restart=dict(reason="apply", from_fp=exp.get("fp_before"), since=int(now), tries=0,
+                                    snapshot=snap))
     if exp.get("proposal") == "pending":
         exp["proposal"] = "applied"
     _log(inst["id"], f"applied {exp.get('label')} ({by})")
 
 
-def _restart(inst):
+def _restart(inst, reason="restart", snapshot=None):
+    R = _R()
+    if R is not None:
+        rec = R.restart(inst, f"auto-fit {reason}", by="auto-fit", known_good=snapshot)
+        return rec["outcome"] == "ok", rec
     with P.using_instance(inst):
         if inst.get("legacy") and P.unit_installed():
             g = P.main_guard(fresh=True)
@@ -439,7 +464,23 @@ def _follow_restart(inst, st, exp, now, force=False):
         return
     pr["tries"] = pr.get("tries", 0) + 1
     pr["last_try"] = int(now)
-    ok, msg = _restart(inst)
+    ok, msg = _restart(inst, pr["reason"], pr.get("snapshot"))
+    if isinstance(msg, dict):                             # a safe restart's record (restarts.py)
+        rec = msg
+        pr.setdefault("restarts", []).append(rec["id"])
+        if rec["outcome"] in ("recovered", "failed"):
+            exp.pop("pending_restart", None)
+            what = "the new settings" if pr["reason"] == "apply" else "the rolled-back settings"
+            exp["restart_error"] = (f"{what} failed the restart check ({rec.get('detail')}); "
+                                    + ("the previous settings were put back" if rec["outcome"] == "recovered"
+                                       else "the known-good settings failed too - check the server"))
+            if pr["reason"] == "apply":
+                exp["verify"] = dict(state="inconclusive", note="never ran: " + exp["restart_error"])
+                st.setdefault("rejected", {})[exp.get("label")] = exp.get("fp_before")
+            st["hold_until"] = int(now) + COOLDOWN_S        # no new experiment straight after that
+            _log(inst["id"], exp["restart_error"])
+            return
+        msg = "ok" if ok else (rec.get("detail") or rec["outcome"])
     if not ok:
         pr["error"] = str(msg)[:300]
     _log(inst["id"], f"restart for {pr['reason']}: {'ok' if ok else msg}")
@@ -457,26 +498,53 @@ def _follow_verify(inst, st, exp, now):
     c = W.compare(before, after)
     v.update(ratio=c["ratio"], matched=c["matched"], n_after=len(after), n_before=len(before),
              buckets=c["buckets"], checked=_now())
-    if c["ratio"] is not None and c["matched"] >= VERIFY_MIN:
-        if c["ratio"] < W.REGRESSION:
+    # Bench statistics: the change as a ratio WITH an interval, from a model of log decode on
+    # depth bucket (+ MTP draft acceptance when every request reports it: on the reference box acceptance
+    # explained ~80 % of request-to-request noise). The number of requests to wait for is
+    # fixed ONCE, from the traffic before the change and the gain that was claimed, so the
+    # single look it gets is an honest test however often this runs.
+    edges = list(P.CURVE_BUCKETS)
+    adjust = bool(before) and all(r.get("accept") is not None for r in before + after)
+    if v.get("need") is None and before:
+        nz = S.traffic_noise(before, edges)
+        sd = nz.get("adjusted_sd") if adjust else nz.get("raw_sd")
+        claim = max(float(exp.get("gain") or 0), st["settings"]["min_gain"], 0.02)
+        n = S.requests_needed(sd, claim) if sd else None
+        v["need"] = max(VERIFY_MIN, min(VERIFY_MAX, n or VERIFY_MIN))
+        v["noise_sd"] = round(sd, 5) if sd else None
+    need = v.get("need") or VERIFY_MIN
+    eff = S.traffic_effect(before, after, edges, adjust=adjust) if after else {}
+    if eff.get("mean_log") is not None:
+        v["effect"] = dict(pct=round(eff["pct"], 2), lo=round(eff["pct_lo"], 2), hi=round(eff["pct_hi"], 2),
+                           adjusted=adjust, verdict=S.verdict(eff["mean_log"], eff["lo_log"], eff["hi_log"],
+                                                              st["settings"]["min_gain"]))
+    if eff.get("mean_log") is not None and c["matched"] >= VERIFY_MIN and len(after) >= need:
+        e = v["effect"]
+        if eff["hi_log"] < 0:                       # the whole interval says slower
             v["state"] = "regressed"
-            _log(iid, f"{exp.get('label')} made real requests slower ({c['ratio']:.0%})")
+            _log(iid, f"{exp.get('label')} made real requests slower ({e['pct']:+.1f} %, "
+                      f"95 % interval {e['lo']:+.1f} … {e['hi']:+.1f} %)")
             st.setdefault("rejected", {})[exp.get("label")] = exp.get("fp_before")
             if exp.get("applied_by") == "auto-fit" or st["settings"]["mode"] == "auto":
                 rollback(inst, st, exp, by="auto-fit", now=now)
         else:
             v["state"] = "confirmed"
+            v["note"] = (f"real traffic {e['pct']:+.1f} % (95 % interval {e['lo']:+.1f} … {e['hi']:+.1f} %), "
+                         f"{e['verdict']}" + (", adjusted for draft acceptance" if adjust else ""))
     elif now - t_restart > VERIFY_DAYS * DAY:
         v["state"] = "inconclusive"
-        v["note"] = f"fewer than {VERIFY_MIN} real requests at comparable depths in {VERIFY_DAYS} days"
+        v["note"] = (f"{len(after)} of the {need} real requests needed in {VERIFY_DAYS} days"
+                     + (f"; so far {v['effect']['pct']:+.1f} % ({v['effect']['lo']:+.1f} … {v['effect']['hi']:+.1f} %)"
+                        if v.get("effect") else ""))
 
 
 def rollback(inst, st, exp, by, now):
+    snap = _snap(inst, exp, "rollback")
     res = O.rollback(exp["run_id"])
     exp["rollback"] = dict(by=by, at=int(now), restored=res.get("restored"), kept=res.get("kept"), note=res.get("note"))
     with P.using_instance(inst):
         fp, _ = W.live_fp()
-    exp["pending_restart"] = dict(reason="rollback", from_fp=fp, since=int(now), tries=0)
+    exp["pending_restart"] = dict(reason="rollback", from_fp=fp, since=int(now), tries=0, snapshot=snap)
     if (exp.get("verify") or {}).get("state") in ("pending", "waiting-restart"):
         exp["verify"]["state"] = "rolled-back"
     _log(inst["id"], f"rolled back {exp.get('label')} ({by})")

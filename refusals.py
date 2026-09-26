@@ -243,6 +243,8 @@ def start(iid, body):
     with _lock:
         if _run and not _run.get("_done"):
             raise ValueError(f"a refusal check is already running on {_run['instance']}")
+    if getattr(getattr(P, "benchlab", None), "active", lambda: False)():
+        raise ValueError("a Bench run is active; wait for it or stop it")
     inst = P.get_instance(iid)
     if inst.get("engine") in P.GEN_ENGINES:
         raise ValueError(f"{iid} runs {inst['engine']}, not a chat model")

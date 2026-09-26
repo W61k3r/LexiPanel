@@ -12,7 +12,7 @@ https://192.0.2.10 {
 
     # Fleet members report to a primary with their own token (the panel checks it); every
     # other path needs the login.
-    @login not path /api/fleet/report /api/fleet/join
+    @login not path /api/fleet/report /api/fleet/join /api/fleet/event
     basicauth @login {
         # placeholder - install.sh replaces it with a real bcrypt hash
         admin $2a$14$REPLACE_ME

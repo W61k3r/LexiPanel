@@ -132,7 +132,7 @@ def measuring(iid):
     """Is LexiPanel itself sending requests to this instance right now?"""
     O, DC = getattr(P, "optimizer", None), getattr(P, "depthcurve", None)
     GT, RF, FQ = getattr(P, "gputune", None), getattr(P, "refusals", None), getattr(P, "fitquant", None)
-    for mod in (O, DC, GT, RF):
+    for mod in (O, DC, GT, RF, getattr(P, "benchlab", None)):
         r = getattr(mod, "_run", None) if mod else None
         if r and not r.get("_done") and r.get("instance") == iid:
             return True
@@ -309,11 +309,11 @@ def own_inflight(iid):
     """How many of LexiPanel's own measurement requests are in flight to this instance.
     Each measuring module holds its open connection in _conn while a request runs."""
     n = 0
-    for name in ("optimizer", "depthcurve", "gputune", "refusals"):
+    for name in ("optimizer", "depthcurve", "gputune", "refusals", "benchlab"):
         mod = getattr(P, name, None)
         r = getattr(mod, "_run", None) if mod else None
         if r and not r.get("_done") and r.get("instance") == iid and getattr(mod, "_conn", None) is not None:
-            n += 1
+            n += mod.inflight() if hasattr(mod, "inflight") else 1      # Bench's goodput runs several
     return n
 
 

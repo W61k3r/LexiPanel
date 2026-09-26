@@ -875,7 +875,12 @@ class Watchdog(Knob):
         v = out.strip() if rc == 0 else ""
         if not v:
             return None
-        return "off" if v in ("0", "infinity") else "on"
+        if v in ("0", "infinity"):
+            return "off"
+        # Configured but no watchdog device means nothing is watching (Ubuntu deny-lists
+        # iTCO_wdt, so modules-load.d skips it at boot): say "off", so applying "on" at boot
+        # loads the driver explicitly and re-executes systemd to arm it.
+        return "on" if self._devs() else "off"
 
     def choices(self, ctx, t):
         return ["on", "off"] if self._module() else ["off"]

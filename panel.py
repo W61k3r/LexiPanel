@@ -15,7 +15,13 @@ from collections import deque
 from pathlib import Path
 
 import hostos                                       # noqa: E402  (Linux/macOS layer)
-HOME       = Path.home() if hostos.IS_MAC else Path("/home/smbadmin")
+import getpass                                      # noqa: E402
+# The account the panel runs as, and its home. Both come from the running process (never a
+# name baked into the code: 1.0.0 fixed one account's home, which only worked for that user).
+# LEXIPANEL_HOME overrides the home for an unusual layout.
+RUN_USER   = getpass.getuser()
+HOME       = Path(os.environ.get("LEXIPANEL_HOME") or Path.home())
+CODE       = Path(__file__).resolve().parent            # where panel.py and instance_launch.py live
 # INF01_PANEL_DIR lets a scratch copy run beside the live panel (on another
 # PANEL_PORT) without touching the live panel's files.
 PANEL      = Path(os.environ.get("INF01_PANEL_DIR") or HOME / "panel")
@@ -305,7 +311,8 @@ def _argv_get(argv, names):
 
 def server_pids():
     # sd-server, audiocpp_server and camelid too: those instances are servers of this panel
-    out = sh("pgrep -x 'llama-server|sd-server|audiocpp_server|camelid|onnx-server'")
+    # vllm: the API server's name, or "VLLM::APIServer" once vLLM retitles it (setproctitle)
+    out = sh("pgrep -x 'llama-server|sd-server|audiocpp_server|camelid|onnx-server|vllm|VLLM::APIServer'")
     return sorted(int(x) for x in out.split() if x.isdigit())
 
 
@@ -393,6 +400,9 @@ def _describe_server(pid):
         return _describe_sd_server(pid, argv, camelid)
     if len(argv) > 1 and Path(argv[1]).name == "onnx_server.py":
         return _describe_sd_server(pid, argv, onnxrt)
+    if Path(argv[0]).name == "vllm" or argv[0].startswith("VLLM::") or \
+            (len(argv) > 1 and Path(argv[1]).name == "vllm"):
+        return _describe_sd_server(pid, argv, vllm_engine)
     try:
         exe = hostos.proc_exe(pid)
     except OSError:
@@ -677,6 +687,28 @@ class _LiveProxy:
 
 _samples = _SamplesProxy()
 _rel_cache = {}                 # GitHub release list, 10 min TTL
+
+
+MAX_BODY = 64 * 1024 * 1024        # JSON bodies (a /v1/batches input is up to 50 MB); uploads stream separately
+OPEN_MAX_BODY = 256 * 1024         # the routes that answer without a login (fleet members)
+
+
+def body_limit(path, content_length, open_paths):
+    """(code, message) to refuse a request body before reading it, or None. The body is read
+    into memory, so a false Content-Length must not be able to make the panel read gigabytes -
+    least of all on the routes anyone who can reach the panel may call."""
+    if path == "/api/files/upload":
+        return None                                      # streamed to disk with its own checks
+    try:
+        n = int(content_length if content_length not in (None, "") else 0)
+    except (TypeError, ValueError):
+        return 400, "bad Content-Length"
+    cap = OPEN_MAX_BODY if path in open_paths else MAX_BODY
+    if n < 0:
+        return 400, "bad Content-Length"
+    if n > cap:
+        return 413, f"request body over {cap // 1024} KiB"
+    return None
 
 
 def sh(cmd, timeout=15):
@@ -1225,7 +1257,11 @@ def save_params(new, backend=None):
     if not inst["legacy"]:
         # Instance-specific params
         inst_dir = inst["dir"]
-        b = str(new.get("BACKEND") or backend or "vulkan")
+        # A partial update (an API client, an MCP tool) that leaves BACKEND out keeps the instance's
+        # current backend. Defaulting to vulkan switched it to params-vulkan.env: a CUDA instance lost
+        # its model and settings (found 2026-09-26 setting only CTX on an RTX 2060 instance).
+        b = str(new.get("BACKEND") or backend
+                or _read_env_file(inst_dir / "params.env").get("BACKEND") or "vulkan")
         if b not in BACKENDS:
             raise ValueError(f"unknown BACKEND {b!r}")
         bf = inst_dir / f"params-{b}.env"
@@ -1379,7 +1415,7 @@ OPT_THREADS   = ["1", "2", "3", "4"]          # E-2224G is 4c/4t
 OPT_NGL       = ["0", "16", "32", "48", "64", "80", "99"]
 OPT_CACHE_RAM = ["0", "-1", "2048", "4096", "8192", "12288", "16384",
                  "20000", "24576", "32768"]
-OPT_PARALLEL  = ["1", "2", "4", "8"]
+OPT_PARALLEL  = ["1", "2", "4", "8", "16", "32"]
 
 # ============================================================================
 # PARAMETER METADATA - drives the settings UI: grouping, input type, and the
@@ -1939,11 +1975,12 @@ _p("FLASH_ATTN", "on", "Throughput", "Flash attention", "select", OPT_FLASH_ATTN
        "this box ships 'on' because that is the configuration every measurement here "
        "was taken under.")
 _p("PARALLEL", "1", "Throughput", "Server slots", "select", OPT_PARALLEL,
-   tip="<code>-np/--parallel</code>. Was <b>hardcoded to 1</b> until 2026-09-15. Each "
-       "slot gets its own share of the KV pool, so going to 2 slots at a fixed CTX "
-       "halves the depth each conversation can reach. Upstream's stock is -1 (auto). "
-       "Keep it at 1 on this box: 24 GB with ~1.4 GB spare does not have room for a "
-       "second full-depth conversation, and the VRAM calculator above assumes one.")
+   tip="<code>-np/--parallel</code>. Conversations served at once (continuous batching). "
+       "With separate KV per slot (the default) each gets CTX / PARALLEL tokens, so 2 slots "
+       "at a fixed CTX halve how deep each can go. With a unified KV buffer they share CTX, "
+       "but llama.cpp needs ~1.7x the tokens in use or it fails requests. The calculator's "
+       "<b>Slots</b> line shows how many run safely at your typical depth, and the gateway "
+       "admits requests by it. One slot is right for a single deep agent.")
 _p("THREADS_HTTP", "", "Throughput", "HTTP threads", "int",
    spin=dict(step=1, min=-1, max=16), presets=["", "-1", "1", "2", "4"],
    tip="<code>--threads-http</code>. Threads serving HTTP, separate from inference "
@@ -3006,6 +3043,57 @@ def _device_footprints(params, pl):
     return devices
 
 
+# llama.cpp puts a batch's KV cache in contiguous free cells. When several conversations share one
+# pool (--kv-unified) the free space fragments: on the RTX 2060 on 2026-09-26, 16 concurrent streams
+# failed ("Context size has been exceeded") with the pool 1.14x the tokens they held and ran clean
+# at 1.71x. Separate KV per slot (llama.cpp's default when the slot count is given) does not
+# fragment across conversations, but caps each one at CTX / PARALLEL.
+KV_POOL_HEADROOM = 1.7
+
+
+def slot_plan(ctx, parallel, unified, kv_mib_per_token, depth, headroom_mib, per_slot_cap=0, margin_mib=1024):
+    """What CTX and PARALLEL mean for conversations served at once, each `depth` tokens deep
+    (prompt + reply): how many run safely, the CTX (and KV memory) all slots need, and the most
+    this card could hold with separate or shared KV."""
+    n, ctx, d = max(1, int(parallel or 1)), max(1, int(ctx)), max(1, int(depth))
+    unified = bool(unified) and n > 1
+    per_slot = (min(ctx, int(per_slot_cap)) if per_slot_cap else ctx) if unified else ctx // n
+    if d > per_slot:
+        safe = 0
+    elif unified:
+        safe = max(1, min(n, int(ctx // (d * KV_POOL_HEADROOM))))    # one alone always fits
+    else:
+        safe = n
+    need_ctx = -(-int(n * d * (KV_POOL_HEADROOM if unified else 1)) // 1024) * 1024 if n > 1 else d
+    kv = float(kv_mib_per_token or 0)
+    extra = (need_ctx - ctx) * kv
+    afford = ctx + max(0.0, headroom_mib - margin_mib) / kv if kv else ctx
+    return dict(parallel=n, unified=unified, per_slot_max=per_slot, depth=d, safe_streams=safe,
+                kv_mib_per_stream=round(d * kv), kv_mib_per_token=round(kv, 5),
+                for_all=dict(ctx=max(need_ctx, 1), kv_mib=round(need_ctx * kv), extra_mib=round(max(0.0, extra)),
+                             fits=extra <= max(0.0, headroom_mib - margin_mib)),
+                max_streams=dict(separate=int(afford // d), shared=int(afford // (d * KV_POOL_HEADROOM))),
+                headroom_factor=KV_POOL_HEADROOM)
+
+
+def _plan_depth(params):
+    """The depth to plan slots for: given, else this instance's p90 request depth (with enough
+    traffic logged), else what one slot can reach."""
+    try:
+        d = int(params.get("PLAN_DEPTH") or 0)
+        if d > 0:
+            return d, "as given"
+    except (TypeError, ValueError):
+        pass
+    try:
+        e = workload.envelope(INST())
+        if e["requests"] >= 20 and e["depth"]["p90"]:
+            return int(e["depth"]["p90"]), f"p90 of this instance's last {e['requests']} requests"
+    except Exception:
+        pass
+    return None, None
+
+
 def estimate(params):
     """VRAM/RAM breakdown + expected speed for a candidate parameter set."""
     g = lambda k, d=None: params.get(k, load_params().get(k, d))
@@ -3217,7 +3305,34 @@ def estimate(params):
         curve=curve["buckets"],
         basis=basis)
 
+    # ---- slots: conversations served at once (llama.cpp batches them; the gateway admits by this)
+    n_par = int(g("PARALLEL", 1) or 1)
+    unified = str(g("KV_UNIFIED", "") or "") == "on"
+    kv_tok = kv_mib / ctx if ctx else 0
+    depth, depth_basis = _plan_depth(params)
+    if depth is None:
+        depth = ctx if (unified or n_par == 1) else ctx // max(1, n_par)
+        depth_basis = "the deepest one slot can go (no traffic logged yet)"
+    try:
+        cap = int(g("KV_UNIFIED_PER_SLOT", 0) or 0)
+    except (TypeError, ValueError):
+        cap = 0
+    slots = slot_plan(ctx, n_par, unified, kv_tok, depth, headroom, cap)
+    slots["depth_basis"] = depth_basis
+    if n_par > 1 and slots["safe_streams"] == 0:
+        warnings.append(f"PARALLEL={n_par}: each conversation can reach {slots['per_slot_max']} tokens "
+                        f"({'the per-slot cap' if unified else 'CTX / PARALLEL, separate KV per slot'}), "
+                        f"less than the {depth} it is planned for ({depth_basis}). Deeper requests fail.")
+    elif n_par > 1 and unified and slots["safe_streams"] < n_par:
+        fa = slots["for_all"]
+        warnings.append(f"{n_par} slots share one {ctx}-token KV pool. At {depth} tokens each only "
+                        f"{slots['safe_streams']} run safely at once: llama.cpp needs ~{KV_POOL_HEADROOM}x "
+                        f"the tokens in use, or it fails requests ('Context size has been exceeded'). "
+                        f"The gateway admits by that; for all {n_par}, CTX {fa['ctx']} "
+                        f"(+{fa['extra_mib']} MiB KV, {'fits' if fa['fits'] else 'does NOT fit'} this card).")
+
     return dict(
+        slots=slots,
         vram=dict(weights_mib=weights, mmproj_mib=mmproj, mtp_mib=mtp,
                   kv_mib=round(kv_mib), compute_mib=round(compute_show),
                   others_mib=others, others=others_by,
@@ -4370,12 +4485,12 @@ def _running_build():
         try:
             exe = os.path.realpath(f"/proc/{pid}/exe")
             d = os.path.dirname(exe)
-            return sh(f"LD_LIBRARY_PATH={d} {exe} --version 2>&1 | head -1")
+            return sh(f"LD_LIBRARY_PATH={shlex.quote(str(d))} {shlex.quote(str(exe))} --version 2>&1 | head -1")
         except OSError:
             pass
     bd = active_build(active_backend())
     if bd:
-        return sh(f"LD_LIBRARY_PATH={bd} {bd}/llama-server --version 2>&1 | head -1")
+        return sh(f"LD_LIBRARY_PATH={shlex.quote(str(bd))} {shlex.quote(str(bd))}/llama-server --version 2>&1 | head -1")
     return "<unknown: nothing running and no active build in builds.env>"
 
 
@@ -4399,7 +4514,7 @@ def crash_logs(boots=8):
     SHAPE of the journal: a boot that ends without systemd-shutdown/'Journal
     stopped' ended by freeze or power loss. For those, the last lines before
     the gap are included. kdump dumps (/var/crash) and pstore records are
-    root-owned; the panel runs as smbadmin (group adm), so it lists them and
+    root-owned; the panel runs as its installing user (group adm), so it lists them and
     includes contents only where it can read them.
     """
     out = dict(note="ended='abrupt' means no clean shutdown was logged: freeze, "
@@ -6336,8 +6451,9 @@ def _probe_vulkan_vram(pci, driver):
     bd = active_build("vulkan")
     if not icd or not bd:
         return None
-    out = sh(f"VK_DRIVER_FILES={icd} VK_ICD_FILENAMES={icd} LD_LIBRARY_PATH={bd} "
-             f"timeout 60 {bd}/llama-server --list-devices 2>&1", timeout=70)
+    out = sh(f"VK_DRIVER_FILES={shlex.quote(str(icd))} VK_ICD_FILENAMES={shlex.quote(str(icd))} "
+             f"LD_LIBRARY_PATH={shlex.quote(str(bd))} timeout 60 {shlex.quote(str(bd))}/llama-server "
+             "--list-devices 2>&1", timeout=70)
     m = re.findall(r"Vulkan\d+: .*?\((\d+) MiB", out)
     val = int(m[0]) if len(m) == 1 else None
     if val:
@@ -6900,17 +7016,17 @@ def legacy_ignored_keys():
 # ============================================================================
 # INSTANCE CONTROL
 # ============================================================================
-USER_UNIT_TEXT = """[Unit]
+USER_UNIT_TEXT = f"""[Unit]
 Description=inf01 llama.cpp inference instance %i
-Documentation=file:///home/smbadmin/AI-INSTRUCTIONS.md
+Documentation=file://{HOME}/AI-INSTRUCTIONS.md
 # Same throttle as inf01-llama: a crash loop on a big model is its own outage.
 StartLimitIntervalSec=600
 StartLimitBurst=3
 
 [Service]
 Type=simple
-WorkingDirectory=/home/smbadmin/llama
-ExecStart=/usr/bin/python3 /home/smbadmin/panel/instance_launch.py %i
+WorkingDirectory={HOME}/llama
+ExecStart={sys.executable if sys.executable.startswith("/") else "/usr/bin/python3"} {CODE}/instance_launch.py %i
 KillMode=control-group
 KillSignal=SIGTERM
 TimeoutStopSec=45
@@ -6933,10 +7049,9 @@ def user_manager():
     """Is there a systemd --user manager the panel can talk to, and will it
     survive logout / come up at boot (linger)?"""
     bus = os.path.exists(f"/run/user/{os.getuid()}/bus")
-    linger = os.path.exists(f"/var/lib/systemd/linger/{os.environ.get('USER') or 'smbadmin'}") \
-        or os.path.exists("/var/lib/systemd/linger/smbadmin")
+    linger = os.path.exists(f"/var/lib/systemd/linger/{RUN_USER}")
     return dict(bus=bus, linger=linger,
-                fix=None if linger else "sudo loginctl enable-linger smbadmin")
+                fix=None if linger else f"sudo loginctl enable-linger {RUN_USER}")
 
 
 def ensure_user_unit():
@@ -7178,6 +7293,8 @@ def create_instance(body):
         return _create_cm_instance(iid, name, devices, alld, backend, body)
     if engine == "onnx":
         return _create_ox_instance(iid, name, devices, alld, body)
+    if engine == "vllm":
+        return _create_vl_instance(iid, name, devices, alld, body)
 
     # Start from a copy of another instance or a profile when asked; otherwise
     # from DEFAULTS with the main model's specifics cleared - its 245k context,
@@ -7324,6 +7441,39 @@ def _create_ox_instance(iid, name, devices, alld, body):
         device_names=[alld[p]["name"] for p in devices],
         created=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())), indent=1))
     onnxrt.write_params(get_instance(iid), vals)
+    (d / ".launch-fails").write_text("0\n")
+    ensure_user_unit()
+    return _instance_record(iid)
+
+
+def _create_vl_instance(iid, name, devices, alld, body):
+    """A vLLM instance: VL_* parameters, one NVIDIA (CUDA) or AMD (ROCm) card."""
+    if len(devices) != 1 or devices[0] == "cpu":
+        raise ValueError("a vLLM instance drives one GPU; pick an NVIDIA or AMD card")
+    vendor = str(alld[devices[0]].get("vendor") or "")
+    backend = {"nvidia": "cuda", "amd": "rocm"}.get(vendor)
+    if not backend:
+        raise ValueError(f"vLLM needs an NVIDIA (CUDA) or AMD (ROCm) card, not {alld[devices[0]]['name']}")
+    src = str(body.get("copy_from") or "")
+    if src:
+        other = get_instance(src.split(":", 1)[-1])
+        if other.get("engine") != "vllm":
+            raise ValueError("copy from a vLLM instance, or start fresh")
+        vals = vllm_engine.load_params(other)
+        vals["VL_API_KEY"] = ""                            # a key is never copied
+    else:
+        vals = dict(vllm_engine.DEFAULTS)
+    vals.update(BACKEND=backend, PORT=int(body.get("port") or _next_free_port()),
+                HOST=str(body.get("host") or "127.0.0.1"))
+    if body.get("model"):
+        vals["VL_MODEL"] = str(body["model"])
+    d = INSTANCES_DIR / iid
+    d.mkdir(parents=True)
+    (d / "instance.json").write_text(json.dumps(dict(
+        name=name or iid, device=devices[0], devices=devices, engine="vllm",
+        device_names=[alld[p]["name"] for p in devices],
+        created=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())), indent=1))
+    vllm_engine.write_params(get_instance(iid), vals)
     (d / ".launch-fails").write_text("0\n")
     ensure_user_unit()
     return _instance_record(iid)
@@ -7566,6 +7716,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if p == "/v1/models":
             return self._send(gateway.models())
+        if p == "/v1/batches" or p.startswith("/v1/batches/"):
+            return gateway.handle_get_batches(self, p, (self.who or [None])[0])
         why = self._foreign("GET") if p.startswith("/api/") else None
         if why:
             return self._send(dict(error=why), 403)
@@ -7684,13 +7836,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     guard=main_guard(),
                     throughput=headline(),
                     live=live_config(),
-                    servers=list_servers(),
+                    servers=list_servers() + remotes.servers(),
+                    run_user=RUN_USER, home=str(HOME),
                     instance=_instance_record(INST()["id"]),
                     gpus=instance_gpus(),
                     instances=list_instances(),
                     uptime=sh(f"ps -o etimes= -p {pid}").strip() if pid else None))
             if p == "/api/servers":
-                return self._send(list_servers())
+                return self._send(list_servers() + remotes.servers())
             if p == "/api/instances":
                 return self._send(dict(instances=list_instances(), devices=gpu_devices(),
                                        user_manager=user_manager()))
@@ -7719,6 +7872,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._send(optimizer.read_run(q.get("id", [""])[0]))
             if p == "/api/optimize/suite":
                 return self._send(optimizer.describe_suite())
+            if p == "/api/remotes":
+                return self._send(remotes.listing())
+            if p in ("/api/restarts", "/api/restarts/report", "/api/restarts/export"):
+                q = urllib.parse.parse_qs(self.path.partition("?")[2])
+                iid = q.get("instance", [INST()["id"]])[0]
+                if p == "/api/restarts":
+                    return self._send(restarts.status(iid))
+                if p == "/api/restarts/report":
+                    return self._send(restarts.report(iid, q.get("id", [""])[0]))
+                return self._send(restarts.export_csv(iid, int(q.get("days", ["90"])[0])), ctype="text/csv")
+            if p in ("/api/bench", "/api/bench/run", "/api/bench/traffic", "/api/bench/calibration"):
+                q = urllib.parse.parse_qs(self.path.partition("?")[2])
+                iid = q.get("instance", [INST()["id"]])[0]
+                if p == "/api/bench":
+                    return self._send(benchlab.status(iid))
+                if p == "/api/bench/run":
+                    return self._send(benchlab.read_run(iid, q.get("id", [""])[0]))
+                if p == "/api/bench/traffic":
+                    return self._send(benchlab.traffic(iid, int(q.get("days", ["14"])[0])))
+                return self._send(benchlab.calibration(iid))
             if p == "/api/refusals/status":
                 return self._send(refusals.status(INST()["id"]))
             if p == "/api/webui":
@@ -7776,7 +7949,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if p == "/api/auth":
                 return self._send(auth.status(*self.who))
             if p == "/api/gateway":
-                return self._send(gateway.status())
+                return self._send(dict(gateway.status(), batches=batches.summary()))
             if p == "/api/fleet":
                 return self._send(fleet.status())
             if p == "/api/hermes":
@@ -7838,6 +8011,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                        group_backends={}, ignored=[]))
             if p == "/api/onnx/status":
                 return self._send(onnxrt.status(INST()))
+            if p == "/api/param-meta" and INST().get("engine") == "vllm":
+                _dev = _device_record(INST()["device"]) if INST()["device"] != "cpu" else None
+                return self._send(dict(meta=vllm_engine.meta(), groups=vllm_engine.GROUPS,
+                                       defaults=vllm_engine.DEFAULTS, drafts=[], projectors=[], engine="vllm",
+                                       instance=dict(id=INST()["id"], legacy=False, device=_dev),
+                                       group_backends={}, ignored=[]))
+            if p == "/api/vllm/status":
+                return self._send(vllm_engine.status(INST()))
             if p == "/api/param-meta" and INST().get("engine") == "camelid":
                 _dev = _device_record(INST()["device"]) if INST()["device"] != "cpu" else None
                 m = camelid.meta()
@@ -7958,6 +8139,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         p = self.path.split("?")[0]
+        too_big = body_limit(p, self.headers.get("Content-Length"), auth.OPEN)
+        if too_big:
+            self.close_connection = True                 # the unread body stays on the socket
+            return self._send(dict(error=too_big[1]), too_big[0])
         if not self._authorize("POST", p):
             return
         if p.startswith("/v1/"):
@@ -8200,6 +8385,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if p in webui_post:
                     return self._send(webui_post[p](body))
                 return self._send(dict(error="not found"), 404)
+            if p in ("/api/remotes/add", "/api/remotes/delete", "/api/remotes/test"):
+                return self._send({"/api/remotes/add": remotes.add, "/api/remotes/delete": remotes.delete,
+                                   "/api/remotes/test": remotes.test}[p](body))
+            if p == "/api/restarts/start":
+                return self._send(restarts.start(body, (self.who or [None])[0] if hasattr(self, "who") else None))
+            if p == "/api/restarts/settings":
+                return self._send(restarts.set_settings(body))
+            if p.startswith("/api/bench/"):
+                bench_post = {"/api/bench/start": benchlab.start, "/api/bench/stop": lambda b: benchlab.stop(),
+                              "/api/bench/delete": benchlab.delete}
+                if p in bench_post:
+                    return self._send(bench_post[p](body))
+                return self._send(dict(error="not found"), 404)
             if p.startswith("/api/power/"):
                 power_post = {
                     "/api/power/apply": poweropts.apply, "/api/power/persist": poweropts.persist,
@@ -8262,6 +8460,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         return self._send(fleet.revoke(str(body.get("box_id") or "")))
                     if p == "/api/fleet/send-now":
                         return self._send(fleet.send_now())
+                    # v2: remote actions (signed, opt-in per box), drain, and members' restart holds
+                    _who = (getattr(self, "who", None) or ("local",))[0] or "local"
+                    if p == "/api/fleet/event":
+                        return self._send(fleet.event(self.headers, json.dumps(body).encode()))
+                    if p == "/api/fleet/action":
+                        return self._send(fleet.queue_action(body, _who))
+                    if p == "/api/fleet/action/cancel":
+                        return self._send(fleet.cancel_action(body))
+                    if p == "/api/fleet/drain":
+                        return self._send(fleet.drain(body, _who))
+                    if p == "/api/fleet/rekey":
+                        return self._send(fleet.rekey(body))
+                    if p == "/api/fleet/policy":
+                        return self._send(fleet.set_policy(body))
                 except PermissionError as e:
                     return self._send(dict(error=str(e)), 403)
                 return self._send(dict(error="not found"), 404)
@@ -8393,7 +8605,10 @@ import camelid                                      # noqa: E402
 camelid.bind(sys.modules[__name__], engines)
 import onnxrt                                       # noqa: E402  (ONNX Runtime GenAI: CPU / NPU)
 onnxrt.bind(sys.modules[__name__])
-GEN_ENGINES = {"sd.cpp": sdcpp, "audio.cpp": audiocpp, "camelid": camelid, "onnx": onnxrt}   # non-llama.cpp engines
+import vllm_engine                                  # noqa: E402  (vLLM: many requests at once)
+vllm_engine.bind(sys.modules[__name__])
+GEN_ENGINES = {"sd.cpp": sdcpp, "audio.cpp": audiocpp, "camelid": camelid, "onnx": onnxrt,
+               "vllm": vllm_engine}   # non-llama.cpp engines
 import flaghelp                                     # noqa: E402
 import gpupower                                     # noqa: E402
 gpupower.bind(sys.modules[__name__])
@@ -8417,10 +8632,18 @@ import workload                                     # noqa: E402  (workload prof
 workload.bind(sys.modules[__name__])
 import autofit                                      # noqa: E402  (auto-fit loop, 1.0.0)
 autofit.bind(sys.modules[__name__], optimizer, workload)
+import benchlab                                     # noqa: E402  (Bench: measurements with intervals)
+benchlab.bind(sys.modules[__name__], optimizer, workload, depthcurve, gputune)
 import auth                                         # noqa: E402  (single / multi-user access, 1.0.0)
 auth.bind(PANEL)
 import gateway                                      # noqa: E402  (one /v1 endpoint, quotas, usage)
 gateway.bind(sys.modules[__name__])
+import restarts                                     # noqa: E402  (safe restarts: journaled, verified)
+restarts.bind(sys.modules[__name__], optimizer, workload, gateway, auth)
+import batches                                      # noqa: E402  (/v1/batches: background jobs)
+batches.bind(sys.modules[__name__], gateway)
+import remotes                                      # noqa: E402  (servers registered by address)
+remotes.bind(sys.modules[__name__])
 import fleet                                        # noqa: E402  (fleet: one primary, many boxes)
 fleet.bind(sys.modules[__name__])
 import hermes                                       # noqa: E402  (Hermes Agent setup)
@@ -8432,6 +8655,8 @@ mcp_server.bind(sys.modules[__name__])
 if __name__ == "__main__":
     optimizer.recover_on_startup()
     fitquant.recover_on_startup()
+    benchlab.recover_on_startup()
+    restarts.recover_on_startup()
     threading.Thread(target=sampler, daemon=True).start()
     threading.Thread(target=engines.scheduler, daemon=True).start()
     threading.Thread(target=gpupower.enforcer, daemon=True).start()
@@ -8440,5 +8665,6 @@ if __name__ == "__main__":
     threading.Thread(target=workload.worker, daemon=True).start()
     threading.Thread(target=autofit.worker, daemon=True).start()
     threading.Thread(target=fleet.worker, daemon=True).start()
+    threading.Thread(target=batches.worker, daemon=True).start()
     print(f"inf01 panel API on http://{BIND}:{PORT} (localhost only; Caddy fronts it)")
     Threaded((BIND, PORT), Handler).serve_forever()

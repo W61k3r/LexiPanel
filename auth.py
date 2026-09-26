@@ -23,9 +23,9 @@ ROLES = ("viewer", "operator", "admin")
 OPERATOR_POST = ("/api/start", "/api/stop", "/api/restart", "/api/main/reset-failed", "/api/optimize/start",
                  "/api/optimize/stop", "/api/curve/start", "/api/curve/stop", "/api/workload/experiment",
                  "/api/workload/stop", "/api/workload/proposal/", "/api/refusals/start", "/api/refusals/stop",
-                 "/api/fleet/send-now")
+                 "/api/fleet/send-now", "/api/bench/start", "/api/bench/stop", "/api/restarts/start")
 ANY_POST = ("/api/mcp", "/api/mcp/call", "/v1/chat/completions")   # models: any user, within their quota            # MCP tools re-check each inner call with the caller's role
-OPEN = ("/api/fleet/report", "/api/fleet/join")     # token / join code checked by fleet.py
+OPEN = ("/api/fleet/report", "/api/fleet/join", "/api/fleet/event")   # token / join code checked by fleet.py
 ADMIN_GET = ("/api/files", "/api/debug-bundle", "/api/backup", "/api/auth/users", "/api/auth/keys", "/api/auth/audit")
 _lock = threading.RLock()
 _cache = {}                                         # sha256(header) -> (user, role, until)
@@ -170,8 +170,8 @@ def needed(method, path):
     if method == "POST":
         if path in OPEN:
             return None
-        if path in ANY_POST:
-            return "viewer"
+        if path in ANY_POST or path == "/v1/batches" or path.startswith("/v1/batches/"):
+            return "viewer"                             # batches: every user, their own only
         return "operator" if any(path == r or (r.endswith("/") and path.startswith(r)) for r in OPERATOR_POST) else "admin"
     if path in OPEN:
         return None

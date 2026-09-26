@@ -100,6 +100,97 @@ depths), `phases: ["candidates"]` with `candidates: [{label, launch}]` (up to 6 
 each the baseline plus its own overrides; never `MODEL`, `BACKEND`, `PORT` or `HOST`) and
 `source`. Auto-fit uses these; the Optimize tab does not need them.
 
+## Bench (measurements with intervals)
+
+| Method | Route |
+|---|---|
+| GET | `/api/bench` |
+| GET | `/api/bench/calibration` |
+| GET | `/api/bench/run` |
+| GET | `/api/bench/traffic` |
+| POST | `/api/bench/delete` |
+| POST | `/api/bench/start` |
+| POST | `/api/bench/stop` |
+
+`/api/bench/start` takes `kind`: `profile` (the running server, no restart), `calibrate`
+(A/A plus the self-test; `restart: true` restarts between blocks), `compare` (A/B with
+`candidate: {"KEY": "value"}`, restarts for every switch) or `goodput` (`concurrency`,
+`goodput_depth`, `slo_ttft_s`, `slo_tps`). Common options: `preset` (`workload` | `quick`) or
+`depths`, `reps`, `n_predict`, `margin` (0.02 = 2 %), `alpha`, `looks`, `blocks`,
+`sampled_reps`, `quiet_s`, `max_wait_s`. Runs that restart the server need
+`allow_restart: true`. `candidate` refuses `PORT`, `HOST`, `BACKEND`, `SPEC_DRAFT_MODEL`,
+`MMPROJ` and unknown keys, and must fit the estimated VRAM. `/api/bench/traffic?days=14` needs
+no GPU. `/api/bench/run?id=` returns a run with every block's raw samples.
+
+## Gateway queue and batch jobs
+
+| Method | Route |
+|---|---|
+| GET | `/v1/batches` |
+| POST | `/v1/batches` |
+
+Every request through the gateway waits for a free slot on the server it is routed to
+(llama.cpp parallel slots, vLLM's requests at once; unknown servers are not limited), and
+interactive requests always go before batch ones. Mark a request as background work with the
+header `X-LexiPanel-Priority: batch` (or a `priority` field, removed before forwarding).
+`/api/gateway` reports each server's slots, busy, waiting (batch), served, mean wait and
+timeouts, and the batch jobs by status.
+
+`POST /v1/batches` with `{"model": default, "input": [{"custom_id", "body": {chat completion}}],
+"metadata": {}}` (or `input_jsonl`) creates a batch; `GET /v1/batches/<id>` shows its status and
+`request_counts`, `GET /v1/batches/<id>/output` returns the results as JSONL,
+`POST /v1/batches/<id>/cancel` and `/delete` stop and remove it. A user only ever sees their own
+batches. Unlike live requests, a batch keeps its prompts and results on disk (0600) until it is
+deleted, at most 7 days after it finished. Up to 10,000 requests or 50 MB per batch.
+
+## vLLM instances
+
+| Method | Route |
+|---|---|
+| GET | `/api/vllm/status` |
+
+An instance with `engine: "vllm"` (create with `/api/instance/create`, one NVIDIA or AMD card)
+runs `vllm serve` from its own venv (`bash install-vllm.sh`, `--rocm` for AMD). Its settings are
+the `VL_*` keys (see `/api/param-meta` on that instance); the API key is write-only (shown as
+`********`). It appears in `/api/servers` and the gateway like any instance, and Bench measures it
+(`profile`, `goodput` up to 32 streams). `/api/vllm/status` reports each runtime's vLLM / torch
+versions and devices.
+
+## Remote endpoints
+
+| Method | Route |
+|---|---|
+| GET | `/api/remotes` |
+| POST | `/api/remotes/add` |
+| POST | `/api/remotes/delete` |
+| POST | `/api/remotes/test` |
+
+Model servers on other machines, registered by address so they appear in `/api/servers` and
+`/api/status` `servers` (with `remote: {name, url, kind, gateway}`) next to local processes.
+`add` (admin): `name`, `url` (`http(s)://host:port` only), optional `api_key`, `kind`
+(`auto` | `llama.cpp` | `vllm` | `openai`) and `gateway` (also serve it at `/v1` under its
+name and model names). `test` probes an address without saving it or its key. Link-local
+(cloud metadata), multicast, unspecified and reserved addresses are refused and re-checked at
+every poll; redirects are not followed; keys are stored 0600 and never returned.
+
+## Safe restarts
+
+| Method | Route |
+|---|---|
+| GET | `/api/restarts` |
+| GET | `/api/restarts/export` |
+| GET | `/api/restarts/report` |
+| POST | `/api/restarts/settings` |
+| POST | `/api/restarts/start` |
+
+`/api/restarts` returns the instance's restart in progress, settings, a 30-day summary and
+the recent history. `/api/restarts/report?id=` is one restart's full journal (every step with
+its time, the intended settings, the verification and recovery results). `/api/restarts/export`
+is CSV (`?days=90`). `/api/restarts/start` (operator) runs a safe restart in the background;
+the audit log records the authenticated caller, never a name from the body.
+`/api/restarts/settings` (admin): `kv_handoff` (experimental, default off), `canary` (default
+on), `hold_s` (gateway hold, default 120) and `drain_s` (wait for requests in flight, default 600).
+
 ## Workload & auto-fit
 
 llama.cpp instances only (`{"na": true}` otherwise). Every call is per instance (`?inst=<id>`).
@@ -149,6 +240,12 @@ Full LexiPanel on every box, one primary (docs/FLEET.md). View-only across boxes
 | POST | `/api/fleet/report` | primary, called by members every 60 s with `Authorization: Bearer <token>`. No login; the token is the proof |
 | POST | `/api/fleet/revoke` | primary: `{box_id}` |
 | POST | `/api/fleet/send-now` | member: report now |
+| POST | `/api/fleet/policy` | member: what the primary may do here `{allow: [instance.start, instance.stop, instance.restart, instance.set], instances: ["*"] or ids, allow_http}`; nothing by default |
+| POST | `/api/fleet/action` | primary (admin): `{box_id, action, args: {instance, reason?, params?, restart?}}` -> a signed command, delivered with that box's next report; `instance.set` takes model and sizing settings only |
+| POST | `/api/fleet/action/cancel` | primary: `{box_id, id}` a command the box has not taken yet |
+| POST | `/api/fleet/drain` | primary: `{box_id, on}` the gateway sends a drained box nothing new |
+| POST | `/api/fleet/rekey` | primary: `{box_id}` a new action key, sent with the box's next report |
+| POST | `/api/fleet/event` | primary, called by members with their token: `{box_id, event: hold|release, instance, seconds}` around a planned restart of a shared instance. No login (Caddy exempts it); the token is the proof |
 
 ## Hermes Agent
 
@@ -414,6 +511,12 @@ curl -s http://127.0.0.1:8090/api/gpu-tune/bench/start -H 'Content-Type: applica
 curl -s http://127.0.0.1:8090/api/gpu-tune/bench | jq '.active | {state, verdict, summary}'
 curl -s http://127.0.0.1:8090/api/gpu-tune/bench/start -H 'Content-Type: application/json' \
      -d '{"instance":"main","label":"mem 1350","trial":[{"knob":"gpu.od_mclk","target":"0000:03:00.0","value":"1350"}]}'
+
+# Bench: is UBATCH=1024 really faster for my workload? (restarts the server, puts it back)
+curl -s http://127.0.0.1:8090/api/bench/start -H 'Content-Type: application/json' \
+     -d '{"kind":"compare","candidate":{"UBATCH":"1024"},"allow_restart":true}'
+curl -s http://127.0.0.1:8090/api/bench | jq '.active | {step, sequential}'
+curl -s 'http://127.0.0.1:8090/api/bench/traffic' | jq '{noise, requests_per_side}'
 
 # MCP: list the tools, call one
 curl -s http://127.0.0.1:8090/api/mcp -H 'Content-Type: application/json' \

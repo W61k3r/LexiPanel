@@ -28,7 +28,7 @@ injection away from ~/.bashrc. Stdlib only.
 import threading
 import base64, json, os, re, ssl, sys, urllib.error, urllib.parse, urllib.request
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 _caller = threading.local()          # in the panel: the user a request came from (multi-user mode)
 PROTOCOLS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 INSTRUCTIONS = ("LexiPanel runs local AI servers (llama.cpp, stable-diffusion.cpp, audio.cpp, Camelid) "

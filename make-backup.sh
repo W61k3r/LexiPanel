@@ -6,30 +6,39 @@
 # Usage: make-backup.sh [outdir]   -> prints the tarball path on stdout
 set -euo pipefail
 
-OUTDIR="${1:-/home/admin/backups}"
+# Paths come from where this script lives (the panel folder) and the home it was installed
+# into, never a hard-coded /home/<user>: the release copy named another user's home, and on a
+# box installed under a different name every backup silently captured an empty stub.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PANEL_DIR="${LEXIPANEL_PANEL_DIR:-${INF01_PANEL_DIR:-$HERE}}"
+BASE="$(dirname "$HERE")"
+OUTDIR="${1:-$BASE/backups}"
 TS=$(date +%Y%m%d_%H%M%S)
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 R="$STAGE/LexiPanel-config-$TS"
-mkdir -p "$R"/{panel,llama,models,llama_logs,netplan-staging,etc/systemd,etc/default}
+mkdir -p "$R"/{panel,llama,models,llama_logs,netplan-staging,etc/systemd,etc/default,systemd-user}
 
 # --- user-space config -----------------------------------------------------
-cp -a /home/admin/panel/. "$R/panel/" 2>/dev/null || true
-rm -rf "$R/panel/__pycache__"
+cp -a "$PANEL_DIR/." "$R/panel/" 2>/dev/null || true
+[ "$PANEL_DIR" = "$HERE" ] || cp -a "$HERE/." "$R/panel/" 2>/dev/null || true
+find "$R/panel" -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 # launch script + its prior revisions; skip the 33MB release tarball and b10766/
-for f in /home/admin/llama/*.sh /home/admin/llama/*.sh.* /home/admin/llama/*.md; do
+for f in "$BASE"/llama/*.sh "$BASE"/llama/*.sh.* "$BASE"/llama/*.md; do
     [ -f "$f" ] && cp -a "$f" "$R/llama/"
 done
 # model-adjacent config only, never the weights
-find /home/admin/models -maxdepth 1 -type f ! -name '*.gguf' \
+find "$BASE/models" -maxdepth 1 -type f ! -name '*.gguf' \
      -exec cp -a {} "$R/models/" \; 2>/dev/null || true
-cp -a /home/admin/llama_logs/. "$R/llama_logs/" 2>/dev/null || true
-cp -a /home/admin/netplan-staging/. "$R/netplan-staging/" 2>/dev/null || true
+cp -a "$BASE/llama_logs/." "$R/llama_logs/" 2>/dev/null || true
+cp -a "$BASE/netplan-staging/." "$R/netplan-staging/" 2>/dev/null || true
+# user units (a panel installed without sudo runs as one; so does rigmon)
+cp -a "$BASE/.config/systemd/user/." "$R/systemd-user/" 2>/dev/null || true
 
 # --- system config ---------------------------------------------------------
-for u in LexiPanel-llama LexiPanel-panel LexiPanel-ttyd LexiPanel-shell; do
-    [ -r "/etc/systemd/system/$u.service" ] && \
-        cp -a "/etc/systemd/system/$u.service" "$R/etc/systemd/"
+# both unit naming schemes: LexiPanel-* (1.0.0 installs) and inf01-* (the original box)
+for f in /etc/systemd/system/LexiPanel-*.service /etc/systemd/system/inf01-*.service; do
+    [ -r "$f" ] && cp -a "$f" "$R/etc/systemd/"
 done
 [ -r /etc/caddy/Caddyfile ]  && cp -a /etc/caddy/Caddyfile "$R/etc/Caddyfile"
 [ -r /etc/default/ttyd ]     && cp -a /etc/default/ttyd    "$R/etc/default/ttyd"
@@ -39,10 +48,15 @@ done
   echo "# LexiPanel live state, captured $(date -Is)"
   echo
   echo "## service state"
-  for u in LexiPanel-llama LexiPanel-panel LexiPanel-ttyd LexiPanel-shell caddy ttyd; do
+  for u in LexiPanel-llama LexiPanel-panel LexiPanel-ttyd LexiPanel-shell inf01-llama inf01-panel \
+           inf01-ttyd inf01-shell caddy ttyd; do
+      case "$(systemctl is-enabled "$u" 2>/dev/null)" in ""|not-found) continue ;; esac
       printf '%-14s %-10s %s\n' "$u" "$(systemctl is-active "$u" 2>&1)" \
                                      "$(systemctl is-enabled "$u" 2>&1)"
   done
+  echo; echo "## user units"
+  systemctl --user list-units --no-legend --plain 'inf01-*' 'LexiPanel-*' 'rigmon*' 2>/dev/null \
+      | awk '{print $1, $3, $4}' || true
   echo; echo "## listening sockets"; ss -ltn 2>/dev/null | awk 'NR>1{print $4}' | sort -u
   PID=$(pgrep -f 'llama-server -m' | head -1 || true)
   if [ -n "$PID" ]; then
@@ -79,7 +93,7 @@ done
   # builds were installed and which one each backend was pointed at. Without
   # this a restore knows the config but not the engine it was tuned against.
   echo; echo "## llama.cpp builds installed (binaries excluded from this tarball)"
-  for _d in /home/admin/llama/b*/; do
+  for _d in "$BASE"/llama/b*/; do
       [ -d "$_d" ] || continue
       _bin=$(find "$_d" -maxdepth 2 -name llama-server -type f 2>/dev/null | head -1)
       [ -n "$_bin" ] || continue
@@ -90,8 +104,8 @@ done
       printf '%-24s %-7s %s\n' "$(basename "$_d")" "$_flav" "$_libdir"
   done
   echo; echo "## active build per backend (panel/builds.env)"
-  if [ -r /home/admin/panel/builds.env ]; then
-      grep -E '^LIB_DIR_' /home/admin/panel/builds.env || echo "(no selections)"
+  if [ -r "$PANEL_DIR/builds.env" ]; then
+      grep -E '^LIB_DIR_' "$PANEL_DIR/builds.env" || echo "(no selections)"
   else
       echo "(no builds.env - every backend on its launch-script fallback)"
   fi
@@ -100,7 +114,7 @@ done
 } > "$R/LIVE-STATE.txt"
 
 for d in AI-INSTRUCTIONS.md CLAUDE.md; do
-    cp -a "/home/admin/$d" "$R/" 2>/dev/null || true
+    cp -a "$BASE/$d" "$R/" 2>/dev/null || true
 done
 
 TARBALL="$OUTDIR/LexiPanel-config-$TS.tar.gz"

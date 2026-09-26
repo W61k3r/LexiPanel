@@ -622,6 +622,8 @@ def bench_start(body):
         raise ValueError("a depth-curve run is in progress; wait for it or stop it")
     if (O.status().get("active") or {}).get("state") == "running":
         raise ValueError("the optimizer is running (it restarts the server); wait for it to finish")
+    if getattr(getattr(P, "benchlab", None), "active", lambda: False)():
+        raise ValueError("a Bench run is active; wait for it or stop it")
     iid = str(body.get("instance") or "main")
     inst = P.get_instance(iid)
     if inst.get("engine") not in (None, "", "llama.cpp"):

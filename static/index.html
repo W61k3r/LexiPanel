@@ -121,6 +121,7 @@ body.sd .llonly{display:none!important} body:not(.sd) .sdonly{display:none!impor
 body.ac .llonly{display:none!important} body:not(.ac) .aconly{display:none!important}
 body.cm .llonly{display:none!important} body:not(.cm) .cmonly{display:none!important}
 body.ox .llonly{display:none!important}
+body.vl .llonly{display:none!important}
 .fmdrop{border:1px dashed var(--line);border-radius:8px;padding:14px;text-align:center;color:var(--dim);margin-bottom:12px}
 .fmdrop.over,.dropover{border-color:var(--accent)!important;background:rgba(88,166,255,.08)!important}
 .fmdrop button.act{margin:6px 4px 0}
@@ -243,6 +244,7 @@ table.wlbars td{padding:4px 6px}
   <button class="on" data-t="status">Status</button>
   <button data-t="params">Parameters</button>
   <button data-t="optimize">Optimize</button>
+  <button data-t="bench">Bench</button>
   <button data-t="workload">Workload</button>
   <button data-t="fleet">Fleet</button>
   <button data-t="access">Access</button>
@@ -269,6 +271,21 @@ table.wlbars td{padding:4px 6px}
     asked on its own port. Start / Restart / Stop below act only on the <b>managed</b> one
     (<code>inf01-llama</code>); everything else on this tab describes that one too.</div>
     <div id="srvbox"></div>
+    <details id="rmbox" style="margin-top:10px"><summary><b>Remote endpoints</b> <span class="muted">model servers on other
+      machines (llama.cpp, vLLM, Ollama, LM Studio, any OpenAI-compatible API), listed above by address</span></summary>
+      <div class="muted" style="font-size:12px;margin-top:6px">Processes on this box are found on their own; a server
+        on another machine has to be registered by address (http(s)://host:port). Its API key is stored readable only
+        by the panel and never shown again. "Through the gateway" also serves it at <span class="mono">/v1</span> on
+        this panel under its name and model names. Adding and removing need the admin role.</div>
+      <div class="subrow">
+        <label style="margin:0">Name <input id="rm_name" placeholder="gpu-box-2" style="width:120px"></label>
+        <label style="margin:0">Address <input id="rm_url" placeholder="http://192.0.2.10:8080" style="width:210px"></label>
+        <label style="margin:0">API key <input id="rm_key" type="password" autocomplete="off" placeholder="optional" style="width:140px"></label>
+        <label style="margin:0">Kind <select id="rm_kind" style="width:auto"><option>auto</option><option>llama.cpp</option><option>vllm</option><option>openai</option></select></label>
+        <label style="margin:0"><input id="rm_gw" type="checkbox" style="width:auto"> through the gateway</label>
+        <button class="act" onclick="rmTest()">Test</button><button class="act" onclick="rmAdd()">Add</button>
+        <span id="rmmsg" class="muted mono"></span></div>
+    </details>
   </div>
   <div class="card" id="newinst" style="display:none"><h2>New inference instance</h2>
     <div class="muted" style="margin-bottom:10px">An instance is one llama-server pinned to
@@ -280,7 +297,8 @@ table.wlbars td{padding:4px 6px}
       <option value="sd.cpp">stable-diffusion.cpp — image and video generation</option>
       <option value="audio.cpp">audio.cpp — speech, voice cloning, transcription, music, sound effects</option>
       <option value="camelid">Camelid — Rust GGUF chat engine (CPU / NVIDIA)</option>
-      <option value="onnx">ONNX Runtime — ONNX models on CPU or an NPU (AMD Ryzen AI, Intel, Qualcomm)</option></select></div></div>
+      <option value="onnx">ONNX Runtime — ONNX models on CPU or an NPU (AMD Ryzen AI, Intel, Qualcomm)</option>
+      <option value="vllm">vLLM — many requests at once (PagedAttention) on an NVIDIA or AMD card</option></select></div></div>
     <div class="prow sdrow" style="display:none"><div class="plabel">Model preset</div><div><select id="ni_preset"></select>
       <div class="muted" id="ni_presetnote" style="margin-top:4px"></div></div></div>
     <div class="prow"><div class="plabel">Primary device</div><div><select id="ni_dev" onchange="niDevice()"></select>
@@ -424,6 +442,28 @@ table.wlbars td{padding:4px 6px}
         <span id="cvmsg" class="muted mono"></span>
       </div>
     </details>
+  </div>
+  <div class="card llonly" id="rscard"><h2>Safe restarts</h2>
+    <div class="muted" style="font-size:12px;line-height:1.5">
+      Every planned restart (auto-fit apply and rollback, or the button below) runs one journaled
+      procedure: the gateway <b>holds</b> new requests instead of failing them, requests in flight
+      finish first, the server must come back on <b>exactly</b> the intended settings (a fallback
+      tier fails) and pass a <b>canary</b> (a fixed prompt at temperature 0 must answer as it did
+      on this configuration before). A failed check puts the last known-good settings back and
+      verifies them; if those fail too it stops and says so. Clients that talk to the engine port
+      directly (e.g. an agent on :8081) are waited for, not held: point them at the gateway
+      (<span class="mono">/v1</span> on this panel) for restarts they never notice.</div>
+    <div id="rshead" style="margin-top:8px"></div>
+    <div class="subrow">
+      <label style="margin:0"><input id="rs_kv" type="checkbox" style="width:auto"> KV handoff <span class="badge warn">experimental</span></label>
+      <label style="margin:0"><input id="rs_canary" type="checkbox" style="width:auto"> canary</label>
+      <label style="margin:0">hold <input id="rs_hold" type="number" min="0" max="900" style="width:65px"> s</label>
+      <label style="margin:0">drain up to <input id="rs_drain" type="number" min="0" max="3600" style="width:70px"> s</label>
+      <button class="act" onclick="rsSave()">Save</button>
+      <button class="act" onclick="rsStart()">Safe restart now</button>
+      <a id="rs_csv" class="muted" style="font-size:12px" download="restarts.csv">export CSV</a>
+      <span id="rsmsg" class="muted mono"></span></div>
+    <div id="rshist" style="margin-top:8px"></div>
   </div>
   <div class="card"><h2>Live</h2><div class="grid" id="live"></div>
     <p class="muted" style="margin-bottom:0">VRAM drops to near zero when idle — amdgpu evicts to
@@ -636,6 +676,68 @@ table.wlbars td{padding:4px 6px}
   </div>
 </section>
 
+<section id="bench">
+  <div class="card sdonly"><h2>Bench</h2><div class="muted">Bench measures llama.cpp servers.</div></div>
+  <div class="card llonly"><h2>Bench &middot; measurements that say how sure they are</h2>
+    <div class="muted" style="font-size:12px;line-height:1.5">
+      Every number here carries an interval, and every comparison ends in a verdict:
+      <span class="badge ok">better</span> <span class="badge fail">worse</span>
+      <span class="badge neutral">small</span> (real, under your margin)
+      <span class="badge neutral">same</span> (equivalent within the margin)
+      <span class="badge warn">undecided</span> (no detectable difference at the precision reached).
+      Speed is measured at temperature 0 with a fixed seed, so draft acceptance cannot wobble
+      between runs; decode is measured at the depths your real requests reach; comparisons run
+      A-B-B-A and stop as soon as the answer is clear. <b>Real requests come first</b>: one that
+      queues behind a Bench request cancels it, and the block is measured again when the server
+      is quiet. Bench uses the server's only slot while it measures, and the prompt cache holds
+      test text afterwards (an agent's next request may have to re-read its context).</div>
+    <div id="bnstatus" style="margin-top:10px"></div>
+  </div>
+  <div class="card llonly"><h2>Your traffic</h2>
+    <div class="muted" style="font-size:12px">No GPU needed: what the requests of the last 14 days
+      say about noise, how much traffic it takes to see a change, and a verdict for every
+      configuration change they span.</div>
+    <div id="bntraffic" style="margin-top:8px"><div class="muted">loading…</div></div>
+  </div>
+  <div class="card llonly"><h2>Calibration &middot; the platform's own error rates</h2>
+    <div id="bncal"><div class="muted">loading…</div></div>
+  </div>
+  <div class="card llonly"><h2>Run</h2>
+    <div class="subrow" style="margin-top:0">
+      <label style="margin:0">Depths <select id="bn_preset" style="width:auto">
+        <option value="workload">your workload's depths</option><option value="quick">quick: 8k and 32k</option></select></label>
+      <label style="margin:0">Samples per depth <input id="bn_reps" type="number" min="2" max="10" value="3" style="width:60px"></label>
+      <label style="margin:0">Tokens per sample <input id="bn_np" type="number" min="16" max="1024" value="128" style="width:70px"></label>
+      <label style="margin:0">Margin % <input id="bn_margin" type="number" min="0.2" max="50" step="0.1" value="2" style="width:60px"
+        title="the smallest change worth acting on; smaller real differences are reported as 'small'"></label>
+    </div>
+    <details open style="margin-top:10px"><summary><b>Profile</b> <span class="muted">the running server as it is (no restart)</span></summary>
+      <div class="subrow"><label style="margin:0">Sampled-acceptance runs <input id="bn_sampled" type="number" min="0" max="20" value="0" style="width:60px"
+        title="extra runs at the server's own temperature with different seeds: how draft acceptance varies on real sampling"></label>
+        <button class="act" onclick="bnStart('profile')">Profile</button></div></details>
+    <details style="margin-top:8px"><summary><b>Calibrate</b> <span class="muted">A/A: the saved settings against themselves, then the self-test</span></summary>
+      <div class="subrow"><label style="margin:0">Blocks <input id="bn_blocks" type="number" min="2" max="24" value="6" style="width:60px"></label>
+        <label style="margin:0"><input id="bn_restart" type="checkbox" style="width:auto"> restart between blocks (the honest noise figure; cuts off a request in flight)</label>
+        <button class="act" onclick="bnStart('calibrate')">Calibrate</button></div></details>
+    <details style="margin-top:8px"><summary><b>Compare</b> <span class="muted">A/B: saved settings (A) against saved + your changes (B); restarts the server</span></summary>
+      <div class="muted" style="font-size:12px;margin-top:6px">One setting per line, e.g. <span class="mono">UBATCH=1024</span>.
+        The saved files are snapshotted first and put back afterwards, and the server ends on the saved settings.</div>
+      <textarea id="bn_cand" rows="3" class="mono" style="width:100%;margin-top:6px" placeholder="UBATCH=1024"></textarea>
+      <div class="subrow"><button class="act" onclick="bnStart('compare')">Compare</button></div></details>
+    <details style="margin-top:8px"><summary><b>Goodput</b> <span class="muted">concurrency: 1..N simultaneous agent turns</span></summary>
+      <div class="subrow"><label style="margin:0">Streams <input id="bn_conc" value="1, 2, 4" style="width:90px"></label>
+        <label style="margin:0">Context per stream <input id="bn_gdepth" value="8k" style="width:70px"></label>
+        <label style="margin:0">Target: first token within <input id="bn_ttft" type="number" value="10" style="width:55px"> s</label>
+        <label style="margin:0">and at least <input id="bn_tps" type="number" value="15" style="width:55px"> t/s</label>
+        <button class="act" onclick="bnStart('goodput')">Measure</button></div></details>
+    <div class="subrow"><button class="act danger" onclick="bnStop()">Stop</button><span id="bnmsg" class="muted mono"></span></div>
+  </div>
+  <div class="card llonly"><h2>Runs</h2>
+    <div class="subrow" style="margin-top:0;margin-bottom:10px"><select id="bn_run" onchange="bnShowRun(this.value)"></select></div>
+    <div id="bnrun"><div class="muted">no runs yet</div></div>
+  </div>
+</section>
+
 <section id="workload">
   <div class="card"><h2>Workload</h2>
     <div class="muted" style="font-size:12px;line-height:1.55">What this instance's real requests look like, learned from
@@ -676,11 +778,22 @@ table.wlbars td{padding:4px 6px}
   </div>
   <div class="card"><h2>Proposals</h2><div id="af_props"></div></div>
   <div class="card"><h2>History</h2><div id="af_hist"></div></div>
+  <div class="card"><h2>Gateway: queue and batch jobs</h2>
+    <div class="muted" style="font-size:12px;line-height:1.5">Requests through the gateway (<span class="mono">/v1</span>
+      on this panel) never reach a server beyond its slots (llama.cpp parallel slots, vLLM's requests at once): the rest
+      wait here, <b>interactive before batch</b>. Mark a request as background work with the header
+      <span class="mono">X-LexiPanel-Priority: batch</span> or submit many at once to <span class="mono">/v1/batches</span>
+      (they run at batch priority and their results download as JSONL). Clients that call an engine's port directly
+      bypass this queue.</div>
+    <div id="gwq" style="margin-top:8px"><div class="muted">loading…</div></div>
+  </div>
 </section>
 <section id="fleet">
   <div class="card"><h2>Fleet</h2>
     <div class="muted" style="font-size:12px;line-height:1.5">Full LexiPanel on every box; one box is the <b>primary</b> and sees
-      them all. Members report every minute (outbound only); nothing here lets the primary change a member.</div>
+      them all. Members report every minute (outbound only). The primary can start, stop, safely restart and re-configure a
+      member's instances only where that member allows it (<i>Remote actions</i>, on the member); every command is signed,
+      runs once, goes through the member's own checks and is audited on both boxes.</div>
     <div class="optform" style="margin-top:6px">
       <div><label>This box's role</label><select id="fl_role"><option value="standalone">Standalone</option>
         <option value="primary">Primary</option><option value="member">Member</option></select></div>
@@ -694,7 +807,32 @@ table.wlbars td{padding:4px 6px}
       <button class="act" onclick="flCode()">Add a box (join code)</button>
       <button class="act" onclick="flSend()">Report now</button><span id="fl_msg" class="muted mono"></span></div>
     <div id="fl_state" style="margin-top:8px;font-size:12px"></div></div>
+  <div class="card" id="fl_remote_card" style="display:none"><h2>Remote actions from the primary</h2>
+    <div class="muted" style="font-size:12px;line-height:1.5">What this box's primary may do here; nothing by default. A command
+      is signed with a key only this box and its primary hold, is refused if altered, late or seen before, and runs through this
+      box's own checks (RAM budget, start guard, safe restart with its fall-back to the known-good settings). No shell commands,
+      no files; settings changes are limited to model choice and sizing.</div>
+    <div class="subrow" id="fl_allow"></div>
+    <div class="optform">
+      <div><label>Instances (ids, comma-separated; * for all)</label><input id="fl_insts" placeholder="*"></div>
+      <div><label style="display:flex;gap:6px;align-items:center;color:var(--fg)"><input type="checkbox" id="fl_http" style="width:auto">
+        accept commands from a plain-http primary (trusted LAN only)</label></div>
+    </div>
+    <div class="subrow"><button class="act" onclick="flPolicy()">Save</button><span id="fl_pmsg" class="muted mono"></span></div>
+    <div id="fl_rstate" style="font-size:12px;margin-top:6px"></div>
+    <div id="fl_rlog" style="margin-top:6px"></div></div>
   <div class="card"><h2>Boxes</h2><div id="fl_boxes"></div></div>
+  <div class="card" id="fl_set" style="display:none"><h2>Change settings on <span id="fl_set_target" class="mono"></span></h2>
+    <div class="muted" style="font-size:12px;line-height:1.5">Model choice and sizing only (<span id="fl_set_keys" class="mono"></span>).
+      A model must already be in that box's models folder. The box saves the settings, then restarts the instance safely if it runs:
+      when the new settings do not verify, it goes back to the known-good ones by itself and reports that.</div>
+    <div class="optform">
+      <div><label>Settings, one KEY=VALUE per line</label><textarea id="fl_set_kv" rows="4" placeholder="MODEL=/path/in/its/models/folder/model.gguf&#10;CTX=32768"></textarea></div>
+      <div><label style="display:flex;gap:6px;align-items:center;color:var(--fg)"><input type="checkbox" id="fl_set_restart" checked style="width:auto">
+        restart it safely afterwards (when it is running)</label></div>
+    </div>
+    <div class="subrow"><button class="act" onclick="flSetSend()">Send</button><button class="act" onclick="flSetClose()">Close</button>
+      <span id="fl_set_msg" class="muted mono"></span></div></div>
 </section>
 <section id="access">
   <div class="card"><h2>Access</h2><div id="ac_mode" style="font-size:13px"></div>
@@ -849,7 +987,7 @@ table.wlbars td{padding:4px 6px}
       <div><label>Reference</label><select id="f_iref"><option value="q8_0">Q8_0 from the source (better)</option><option value="current">the instance's current model (faster)</option></select></div>
       <div><label>Calibration tokens</label><input id="f_itok" type="number" value="300000" step="50000" min="50000"></div>
       <div><label>Instance whose card to use</label><select id="f_iinst"></select></div>
-      <div><label>Your own text files first (paths, comma separated)</label><input id="f_ifiles" placeholder="e.g. /home/smbadmin/agent-transcripts.txt"></div>
+      <div><label>Your own text files first (paths, comma separated)</label><input id="f_ifiles" placeholder="e.g. ~/agent-transcripts.txt"></div>
     </div>
     <div class="muted" style="font-size:11px;margin-top:6px">Default text is a code-heavy mix: Python sources, package docs and licences on this box. Agent transcripts from your own work make it better.</div>
     <div style="margin-top:10px"><button class="act" onclick="fitImatrix()">Build importance matrix</button><span id="f_imsg" class="muted mono"></span></div>
@@ -862,7 +1000,7 @@ table.wlbars td{padding:4px 6px}
       f16 by default: it is small and quantizing it shows as banding. audio.cpp takes per-prefix keep rules.</div>
     <div class="optform">
       <div><label>Kind</label><select id="f_ckind" onchange="fitConvKind()"><option value="mmproj">llama.cpp projector (mmproj)</option><option value="sd.cpp">stable-diffusion.cpp model</option><option value="audio.cpp">audio.cpp model</option></select></div>
-      <div><label>Input file</label><input id="f_cin" placeholder="/home/smbadmin/models/mmproj-F16.gguf"></div>
+      <div><label>Input file</label><input id="f_cin" placeholder="~/models/mmproj-F16.gguf"></div>
       <div><label>Format</label><input id="f_ctype" value="Q8_0"></div>
       <div><label>Rules</label><input id="f_crules" placeholder="(none)"></div>
       <div><label>Output name (in ~/models/fit)</label><input id="f_cname" placeholder="mmproj-Q8_0.gguf"></div>
@@ -1281,7 +1419,7 @@ let INST=(()=>{ const h=(location.hash.match(/inst=([a-z0-9-]+)/)||[])[1];
   if(h) return h; try{ return localStorage.getItem('inf01.inst')||'main'; }catch(e){ return 'main'; } })();
 const withInst=u=>u.startsWith('/api/')?u+(u.includes('?')?'&':'?')+'inst='+encodeURIComponent(INST):u;
 const $=s=>document.querySelector(s), j=async(u,o)=>(await fetch(withInst(u),o)).json();
-let TAB='status', INSTANCES=null, DEVICES=[], GVIEW='instance';
+let TAB='status', INSTANCES=null, DEVICES=[], GVIEW='instance', RUN_USER='', HOME_DIR='';
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('on',x===b));
   document.querySelectorAll('section').forEach(s=>s.classList.toggle('on',s.id===b.dataset.t));
@@ -1289,11 +1427,12 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
   if(TAB==='crashes') drawCrashes();
   if(TAB==='files') fmLoad();
   if(TAB==='fit') fitLoad();
-  if(TAB==='workload') wlLoad();
+  if(TAB==='workload'){ wlLoad(); gwqLoad(); }
   if(TAB==='fleet') flLoad(true);
   if(TAB==='access') acLoad();
   if(TAB==='power'){ pwLoad(); pwStability(); pwBudget(true); }
   if(TAB==='gputune') gtLoad(true);
+  if(TAB==='bench') bnLoad(true);
   if(TAB==='params') CM_DRAWN=null;
   if(TAB==='builds'){ drawEngines(); drawBuilds(); drawBuildDownloads(); }
   refresh();
@@ -1462,10 +1601,12 @@ function guardLine(g){
 let ENGINE='llama.cpp';
 async function refresh(){
   const s=await j('/api/status');
+  if(s.run_user) RUN_USER=s.run_user; if(s.home) HOME_DIR=s.home;
   ENGINE=s.engine||'llama.cpp'; document.body.classList.toggle('sd',ENGINE==='sd.cpp');
   document.body.classList.toggle('ac',ENGINE==='audio.cpp');
   document.body.classList.toggle('cm',ENGINE==='camelid');
   document.body.classList.toggle('ox',ENGINE==='onnx');
+  document.body.classList.toggle('vl',ENGINE==='vllm');
   if(s.error&&/no instance/.test(s.error)){ selectInstance('main'); return; }
   const sv=s.servers||[];
   if(s.instances){ INSTANCES=s.instances; drawInstbar(); }
@@ -1479,7 +1620,7 @@ async function refresh(){
   $('#unitline').innerHTML = u
     ? `systemd${u.scope==='user'?' --user':''} unit ${escAttr(u.unit||'inf01-llama')}: <b>${u.active}</b>, boot start <b>${u.enabled}</b>`
       + (u.enabled==='enabled'?'':' &mdash; <span style="color:var(--warn)">not enabled; will not start on boot</span>')
-      + (u.scope==='user'&&u.linger===false?' &mdash; <span style="color:var(--warn)">linger is off: user units stop at logout and never start at boot (<code>sudo loginctl enable-linger smbadmin</code>)</span>':'')
+      + (u.scope==='user'&&u.linger===false?' &mdash; <span style="color:var(--warn)">linger is off: user units stop at logout and never start at boot (<code>sudo loginctl enable-linger '+escAttr(RUN_USER)+'</code>)</span>':'')
     : (INST==='main'?'<span style="color:var(--warn)">no systemd unit installed &mdash; started directly, will NOT survive a reboot</span>'
                     :'<span style="color:var(--warn)">no systemd --user bus &mdash; Start falls back to a direct launch that dies with the panel</span>');
   LAST_GUARD=s.guard||null;
@@ -1516,6 +1657,12 @@ async function refresh(){
     + (ENGINE==='sd.cpp'
        ? box('Engine','sd.cpp · '+escAttr(s.params.BACKEND))+box('Default size',s.params.SD_WIDTH+'×'+s.params.SD_HEIGHT)
          +box('Server',s.health&&s.health.status||(s.running?'loading':'stopped'))
+       : ENGINE==='vllm'
+       ? box('Engine','vLLM · '+escAttr(s.params.BACKEND))
+         +box('Server',s.health&&s.health.status||(s.running?'loading':'stopped'))
+         +box('Model',escAttr((s.health&&s.health.model)||String(s.params.VL_SERVED_NAME||s.params.VL_MODEL||'none').split('/').pop()))
+         +box('Requests',s.health&&s.health.running!=null?s.health.running+' running · '+(s.health.waiting||0)+' waiting':'—')
+         +box('KV cache',s.health&&s.health.kv_cache_used_pct!=null?s.health.kv_cache_used_pct+'% used':'—')
        : ENGINE==='camelid'
        ? box('Engine','Camelid · '+escAttr(s.params.BACKEND))
          +box('Server',s.health&&s.health.status||(s.running?'loading':'stopped'))
@@ -1528,9 +1675,10 @@ async function refresh(){
   if(TAB==='status'&&ENGINE==='sd.cpp') drawSdGen(s);
   if(TAB==='status'&&ENGINE==='audio.cpp') drawAcRun(s);
   if(TAB==='status'&&ENGINE==='camelid') drawCmChat(s);
-  if(TAB==='params'){ drawParams(s.params); if(ENGINE==='sd.cpp') drawSdPreset(); else if(ENGINE==='audio.cpp') drawAcModels(); else if(ENGINE==='camelid'){ if(CM_DRAWN!==INST){ CM_DRAWN=INST; drawCmModels(); } } else if(ENGINE!=='onnx'){ drawTiers(); drawProfiles(); } }
-  if(TAB==='status'&&ENGINE==='llama.cpp'){ drawIProfiles(); drawCurve(); drawWebUI(); drawHermes(); }
+  if(TAB==='params'){ drawParams(s.params); if(ENGINE==='sd.cpp') drawSdPreset(); else if(ENGINE==='audio.cpp') drawAcModels(); else if(ENGINE==='camelid'){ if(CM_DRAWN!==INST){ CM_DRAWN=INST; drawCmModels(); } } else if(ENGINE!=='onnx'&&ENGINE!=='vllm'){ drawTiers(); drawProfiles(); } }
+  if(TAB==='status'&&ENGINE==='llama.cpp'){ drawIProfiles(); drawCurve(); drawWebUI(); drawHermes(); drawRestarts(); }
   if(TAB==='optimize'&&ENGINE==='llama.cpp') drawOptimize(s);
+  if(TAB==='bench'&&ENGINE==='llama.cpp') bnLoad();
   if(TAB==='gpu') drawGpu();
   if(TAB==='models') drawModels();
   if(TAB==='download') drawDl();
@@ -1686,6 +1834,11 @@ async function drawParams(p){
     $('#backendbox').insertAdjacentHTML('beforeend','<div class="muted" style="font-size:12px;margin-top:6px">ONNX Runtime instance: the execution provider below picks CPU, an NPU or a GPU. Runtime: '
       +(r.error?'<b style="color:var(--warn)">not installed</b> (bash install-onnx.sh)':'onnxruntime-genai '+esc(r.version)+' · providers in this build: cpu'+['cuda','dml','openvino','qnn','webgpu'].filter(k=>r[k]).map(k=>', '+k).join(''))
       +'. NPUs seen: '+((o.npus||[]).map(n=>esc((n.vendor||'?')+' ('+(n.driver||'?')+') → '+(n.provider||'?'))).join(', ')||'none')+'.</div>'); });
+  if(PMETA.engine==='vllm') j('/api/vllm/status').then(o=>{ const rs=o.runtimes||{};
+    $('#backendbox').insertAdjacentHTML('beforeend','<div class="muted" style="font-size:12px;margin-top:6px">vLLM instance: '
+      +'the card is used by this server alone (it takes the memory share below at start). Runtimes: '
+      +['cuda','rocm'].map(b=>{ const x=rs[b]||{}, r=x.runtime||{}; return b+' '+(x.installed?(r.error?'<b style="color:var(--warn)">broken</b>':'vllm '+esc(r.vllm)+' / torch '+esc(r.torch)):'<b style="color:var(--warn)">not installed</b>'); }).join(' · ')
+      +'. Install: <code>'+esc(o.install||'')+'</code></div>'); });
   if(PMETA.engine==='camelid') $('#backendbox').insertAdjacentHTML('beforeend','<div class="muted" style="font-size:12px;margin-top:6px">Camelid instance: CPU, or an NVIDIA card with <b>cuda</b>. It has no Vulkan/ROCm, so AMD cards cannot be used. Pick the model under <b>Camelid models</b> below.</div>');
   if(PMETA.engine==='audio.cpp') $('#backendbox').insertAdjacentHTML('beforeend','<div class="muted" style="font-size:12px;margin-top:6px">audio.cpp instance: one server, one device. Which models it serves is under <b>Models on this instance</b> below.</div>');
   if(PMETA.engine==='sd.cpp') $('#backendbox').insertAdjacentHTML('beforeend','<div class="muted" style="font-size:12px;margin-top:6px">stable-diffusion.cpp instance: the text encoder, diffusion model and VAE are placed by the <b>Placement &amp; memory</b> group below.</div>');
@@ -1764,7 +1917,14 @@ async function refreshCalc(){
        ${box('Decode @ ctx','~'+sp.decode_tps_at_ctx+' t/s','~'+sp.decode_tps_shallow+' t/s shallow')}
        ${box('Prefill','~'+sp.prefill_tps+' t/s','full depth ~'+sp.full_prefill_s+' s')}
        ${box('Host RAM worst case',r.est_worst_mb+' MB','of '+r.total_mb+' MB')}
+       ${e.slots?box('Slots',e.slots.safe_streams+' of '+e.slots.parallel,
+          `at ${e.slots.depth} tokens each`+(e.slots.parallel>1?` · ${e.slots.unified?'shared pool':'up to '+e.slots.per_slot_max+' each'}`:'')):''}
      </div>
+     ${e.slots?`<div class="basis" style="font-style:normal"><b>Slots</b> (conversations served at once, planned at ${escAttr(e.slots.depth)} tokens: ${escAttr(e.slots.depth_basis||'')}):
+       each holds ~${escAttr(e.slots.kv_mib_per_stream)} MiB of KV. This card could hold ~${escAttr(e.slots.max_streams.separate)} at that depth with
+       separate KV per slot (CTX = slots x depth), or ~${escAttr(e.slots.max_streams.shared)} sharing one pool, which lets one conversation go
+       deeper but needs ~${escAttr(e.slots.headroom_factor)}x the tokens in use.${e.slots.parallel>1?` All ${escAttr(e.slots.parallel)} at once need CTX
+       ${escAttr(e.slots.for_all.ctx)} (${escAttr(e.slots.for_all.kv_mib)} MiB KV, ${e.slots.for_all.fits?'fits':'does not fit'}).`:''}</div>`:''}
      ${(e.warnings||[]).map(w=>`<div class="calcwarn">${w}</div>`).join('')}
      ${(e.warnings||[]).length?'':'<div class="calcok">Fits, with spike headroom.</div>'}
      ${(e.notes||[]).map(n=>`<div class="basis" style="font-style:normal">${escAttr(n)}</div>`).join('')}
@@ -1962,7 +2122,7 @@ async function drawBuildDownloads(){
 function drawServers(sv, known){
   if(!known){ $('#srvbox').innerHTML='<span class="badge warn">restart panel</span> '
     +'<span class="muted">the running panel.py predates multi-server reporting</span>'; return; }
-  if(!sv.length){ $('#srvbox').innerHTML='<div class="muted">no llama-server is running</div>'; return; }
+  if(!sv.length){ $('#srvbox').innerHTML='<div class="muted">no llama-server is running and no remote endpoint is registered</div>'; return; }
   const hb=h=>h==='ok'?'<span class="badge ok">ok</span>'
             :(h==='loading'?'<span class="badge warn">loading</span>'
             :`<span class="badge fail">${escAttr(h)}</span>`);
@@ -1977,6 +2137,16 @@ function drawServers(sv, known){
     +'<th>RSS</th><th>Uptime</th></tr>'
     + sv.map(x=>{
       if(x.error) return `<tr><td colspan="10" class="mono">pid ${x.pid}: ${escAttr(x.error)}</td></tr>`;
+      if(x.remote) return `<tr><td class="mono">${escAttr(x.host)}:${x.port}</td>
+        <td class="mono" title="${escAttr(x.model)}">${escAttr(x.remote.name)} <span class="badge neutral">remote</span>${x.remote.gateway?' <span class="badge ok">gateway</span>':''}
+          <div class="muted">${escAttr(x.model_name||'')} &middot; ${escAttr(x.remote.url)}
+          <a style="cursor:pointer;color:var(--fail)" title="remove this endpoint" onclick="rmDelete('${escAttr(x.remote.name)}')">remove</a></div>
+          ${(x.warnings||[]).map(w=>`<div style="color:var(--warn);font-size:12px">&#9888; ${escAttr(w)}</div>`).join('')}</td>
+        <td class="mono">${escAttr(x.remote.kind||'?')}</td>
+        <td class="mono">${x.ctx?'ctx '+x.ctx:''}</td>
+        <td>${hb(x.health)}</td>
+        <td class="mono">${x.slots!=null?x.slots_busy+'/'+x.slots+' busy':(x.running!=null?x.running+' running, '+(x.waiting||0)+' waiting':'—')}</td>
+        <td class="mono">${x.live_tps??'—'}</td><td class="mono">—</td><td class="mono">—</td><td class="mono">—</td></tr>`;
       const cfg=[x.ctx&&('ctx '+x.ctx), x.kv&&('kv '+x.kv), x.ngl!=null&&('ngl '+x.ngl),
                  x.spec, x.mmproj&&'vision', x.parallel&&x.parallel!=='1'&&('np '+x.parallel)]
                 .filter(Boolean).join(' · ');
@@ -2088,6 +2258,211 @@ async function curveStart(){
   setMsg('#cvmsg','running'); drawCurve(true);
 }
 async function curveStop(){ const r=await pj('/api/curve/stop'); setMsg('#cvmsg',fail(r)?errOf(r):'stopping…'); setTimeout(()=>drawCurve(true),1500); }
+
+// ---- Gateway queue and batch jobs (gateway.py admission, batches.py) -------
+async function gwqLoad(){
+  const g=await j('/api/gateway');
+  if(fail(g)){ $('#gwq').innerHTML=`<div class="calcwarn">${esc(errOf(g))}</div>`; return; }
+  const a=g.admission||[], b=(g.batches||{}).batches||{};
+  $('#gwq').innerHTML=(a.length?`<table class="curve"><tr><th>Server</th><th style="text-align:right">Slots</th><th style="text-align:right">Busy</th>
+      <th style="text-align:right" title="Shared KV pool: tokens in flight / tokens it holds without failing requests">KV pool</th>
+      <th style="text-align:right">Waiting (batch)</th><th style="text-align:right">Served</th><th style="text-align:right">Mean wait</th><th style="text-align:right">Timed out</th></tr>`
+      +a.map(x=>`<tr><td class="mono">${esc(x.server)}</td><td class="num">${x.capacity??'—'}</td><td class="num">${x.busy}</td>
+        <td class="num" title="${x.waited_for_kv?esc(x.waited_for_kv)+' request(s) waited for room in the pool':''}">${x.kv_pool?esc(x.kv_tokens)+' / '+esc(x.kv_pool):'—'}</td>
+        <td class="num">${x.waiting} (${x.waiting_batch})</td><td class="num">${x.served}</td>
+        <td class="num">${x.mean_wait_s!=null?x.mean_wait_s+' s':'—'}</td><td class="num">${x.timeouts}</td></tr>`).join('')+'</table>'
+      :'<div class="muted" style="font-size:12px">No request has gone through the gateway since the panel started.</div>')
+    +`<div class="muted" style="font-size:12px;margin-top:6px">Batch jobs: ${Object.keys(b).length?Object.entries(b).map(([k,v])=>esc(k)+' '+v).join(' · '):'none'}
+      &middot; kept ${(g.batches||{}).retain_days??'—'} days after they finish</div>`;
+}
+
+// ---- Remote endpoints (remotes.py) -----------------------------------------
+function rmBody(){ return {name:$('#rm_name').value.trim(), url:$('#rm_url').value.trim(), api_key:$('#rm_key').value,
+                           kind:$('#rm_kind').value, gateway:$('#rm_gw').checked}; }
+async function rmTest(){
+  setMsg('#rmmsg','asking…');
+  const r=await pj('/api/remotes/test',rmBody());
+  if(fail(r)){ setMsg('#rmmsg','REJECTED: '+errOf(r),'var(--fail)'); return; }
+  setMsg('#rmmsg',`${r.health} · ${r.kind}${r.models&&r.models.length?' · '+r.models.slice(0,3).join(', '):''}${r.ctx?' · ctx '+r.ctx:''}${r.error?' · '+r.error:''}`,
+         r.health==='ok'?'var(--ok)':'var(--warn)');
+}
+async function rmAdd(){
+  const r=await pj('/api/remotes/add',rmBody());
+  if(fail(r)){ setMsg('#rmmsg','REJECTED: '+errOf(r),'var(--fail)'); return; }
+  $('#rm_key').value=''; setMsg('#rmmsg','added '+r.name,'var(--ok)'); refresh();
+}
+async function rmDelete(name){
+  if(!confirm('Remove the remote endpoint '+name+'? (Nothing on that machine changes.)')) return;
+  const r=await pj('/api/remotes/delete',{name});
+  if(fail(r)){ alert(errOf(r)); return; }
+  refresh();
+}
+
+// ---- Safe restarts (restarts.py) ------------------------------------------
+let RS_AT=0, RS_FORM=null;
+const rsBadge=o=>`<span class="badge ${({ok:'ok',recovered:'warn',failed:'fail'})[o]||'neutral'}">${esc(o||'running')}</span>`;
+async function drawRestarts(force){
+  if(!force&&Date.now()-RS_AT<5000) return;
+  RS_AT=Date.now();
+  const r=await j('/api/restarts');
+  if(fail(r)){ $('#rshead').innerHTML=`<div class="calcwarn">${esc(errOf(r))}</div>`; return; }
+  const s=r.summary||{}, o=s.outcomes||{}, a=r.active, st=r.settings||{};
+  if(RS_FORM!==INST){ RS_FORM=INST; $('#rs_kv').checked=!!st.kv_handoff; $('#rs_canary').checked=st.canary!==false;
+    $('#rs_hold').value=st.hold_s; $('#rs_drain').value=st.drain_s; }
+  $('#rs_csv').href=withInst('/api/restarts/export');
+  $('#rshead').innerHTML=(a?`<div><span class="live-pip"></span> restart in progress: <b>${esc(a.state)}</b> (${esc(a.reason)}, by ${esc(a.by)})</div>`:'')
+    +`<div style="font-size:13px">${s.restarts||0} restarts in ${s.days} days &middot; ok ${o.ok||0} &middot; recovered ${o.recovered||0} &middot; failed ${o.failed||0}
+      &middot; silent failures caught <b>${s.caught||0}</b> &middot; median downtime ${s.downtime_median_s??'—'} s
+      &middot; requests held ${s.held||0}${s.held_expired?` (${s.held_expired} timed out)`:''}${s.kv_tokens_handed_off?` &middot; ${kfmt(s.kv_tokens_handed_off)} tokens of context kept`:''}</div>`
+    +(r.known_good?'':'<div class="muted" style="font-size:12px">No known-good configuration recorded yet: the first safe restart that verifies records one. Until then a failed check can only report, not recover.</div>');
+  const h=r.history||[];
+  $('#rshist').innerHTML=h.length?`<table class="curve"><tr><th>When</th><th>Why</th><th>Outcome</th><th style="text-align:right">Down</th><th style="text-align:right">Drain</th><th>Canary</th><th style="text-align:right">KV kept</th><th>Detail</th></tr>`
+    +h.map(x=>`<tr><td class="mono" style="font-size:11px">${esc((x.started||'').replace('T',' ').slice(0,16))}</td><td style="font-size:12px">${esc(x.reason)} <span class="muted">(${esc(x.by)})</span></td>
+      <td>${rsBadge(x.outcome)}</td><td class="num">${x.downtime_s??'—'} s</td><td class="num">${x.drain_s??'—'} s</td>
+      <td style="font-size:11px">${esc(x.canary||'—')}</td><td class="num">${x.kv_tokens?kfmt(x.kv_tokens):'—'}</td>
+      <td style="font-size:11px">${esc(x.detail||'')}${(x.notes||[]).length?`<div class="muted">${esc(x.notes.join('; '))}</div>`:''}</td></tr>`).join('')+'</table>'
+    :'<div class="muted" style="font-size:12px">No safe restarts yet.</div>';
+}
+async function rsSave(){
+  const r=await pj('/api/restarts/settings',{kv_handoff:$('#rs_kv').checked,canary:$('#rs_canary').checked,
+    hold_s:+$('#rs_hold').value,drain_s:+$('#rs_drain').value});
+  setMsg('#rsmsg',fail(r)?'REJECTED: '+errOf(r):'saved',fail(r)?'var(--fail)':'var(--ok)'); RS_FORM=null; drawRestarts(true);
+}
+async function rsStart(){
+  if(!confirm(`Safe restart of ${INST}?\n\nNew gateway requests are held, requests in flight finish first, then the server restarts and is verified. A failed check puts the last known-good settings back.`)) return;
+  const r=await pj('/api/restarts/start',{reason:'operator'});
+  setMsg('#rsmsg',fail(r)?'REJECTED: '+errOf(r):'restarting…',fail(r)?'var(--fail)':'var(--dim)'); setTimeout(()=>drawRestarts(true),1500);
+}
+
+// ---- Bench: measurements with intervals (benchlab.py / benchstats.py) ----
+let BN_AT=0, BN_RUN=null, BN_RUNS_SIG='';
+const bnBadge=v=>`<span class="badge ${({better:'ok',worse:'fail',undecided:'warn'})[v]||'neutral'}">${esc(v||'—')}</span>`;
+const bnPct=(x,d=2)=>x==null?'—':(x>=0?'+':'')+(+x).toFixed(d)+' %';
+const bnSd=x=>x==null?'—':(100*x).toFixed(2)+' %';
+async function bnLoad(force){
+  if(!force&&Date.now()-BN_AT<4000) return;
+  BN_AT=Date.now();
+  const st=await j('/api/bench');
+  if(fail(st)){ $('#bnstatus').innerHTML=`<div class="calcwarn">${esc(errOf(st))}</div>`; return; }
+  bnDrawStatus(st);
+  const sig=JSON.stringify((st.runs||[]).map(r=>[r.id,r.state]));
+  if(force||sig!==BN_RUNS_SIG){ BN_RUNS_SIG=sig; bnDrawRuns(st.runs||[]); bnDrawCal(); }
+  if(force) bnDrawTraffic();
+}
+function bnDrawStatus(st){
+  const a=st.active;
+  if(!a){ const l=st.last; $('#bnstatus').innerHTML=l?`<div class="muted" style="font-size:12px">Last run: ${esc(l.kind)} ${esc(l.id)} &middot; ${esc(l.state)}${l.error?' &middot; <span style="color:var(--fail)">'+esc(l.error)+'</span>':''}${l.needs_restart?' &middot; <b style="color:var(--warn)">restart the server: it may still run the candidate</b>':''}</div>`:''; return; }
+  const lv=a.live||{};
+  $('#bnstatus').innerHTML=`<div><span class="live-pip"></span> <b>${esc(a.kind)}</b> ${esc(a.id)} &middot; ${esc(a.step||'')}</div>
+    <div class="muted mono" style="font-size:11px;margin-top:4px">blocks ${(a.blocks||[]).length} &middot; depths ${(a.shape&&a.shape.depths||[]).map(kfmt).join(', ')}
+      &middot; ${lv.power_w??'—'} W &middot; junction ${lv.junction??'—'} C${a.external_wait_s?' &middot; waited '+a.external_wait_s+' s for real traffic':''}</div>
+    ${a.sequential&&a.sequential.n?`<div class="muted" style="font-size:12px;margin-top:4px">after ${a.sequential.n} pairs: B request time ${bnPct(a.sequential.pct)} (${bnPct(a.sequential.pct_lo)} … ${bnPct(a.sequential.pct_hi)})${a.sequential.next_look?' &middot; next look at '+a.sequential.next_look+' pairs':''}</div>`:''}
+    <pre style="max-height:140px;margin-top:6px">${esc((a.log||[]).slice(-8).join('\n'))}</pre>`;
+}
+async function bnDrawTraffic(){
+  const t=await j('/api/bench/traffic');
+  if(fail(t)){ $('#bntraffic').innerHTML=`<div class="calcwarn">${esc(errOf(t))}</div>`; return; }
+  const n=t.noise||{};
+  if(!n.raw_sd){ $('#bntraffic').innerHTML=`<div class="muted">${t.requests} requests so far: not enough to say anything yet.</div>`; return; }
+  const need=t.requests_per_side||{};
+  let h=`<div style="font-size:13px">${t.requests} requests. Decode from one request to the next, at the same depth, varies
+    <b>${bnSd(n.raw_sd)}</b>${n.adjusted_sd?`; once MTP draft acceptance is accounted for, <b>${bnSd(n.adjusted_sd)}</b>
+    (acceptance explains ${Math.round(100*n.explained)} %; 0.1 of acceptance is worth ${(+n.pct_per_0_1_acceptance).toFixed(1)} % speed)`:''}.</div>
+    <table class="curve" style="margin-top:8px"><tr><th>To see a change of</th><th style="text-align:right">requests per side, raw</th><th style="text-align:right">adjusted for acceptance</th></tr>
+    ${Object.entries(need).map(([k,v])=>`<tr><td>${esc(k)}</td><td class="num">${v.raw??'—'}</td><td class="num"><b>${v.adjusted??'—'}</b></td></tr>`).join('')}</table>`;
+  const ch=t.changes||[];
+  h+=`<div style="margin-top:10px;font-size:13px"><b>Configuration changes</b> <span class="muted">(real decode after vs before, same depths, adjusted for acceptance; margin 2 %)</span></div>`;
+  if(!ch.length) h+=`<div class="muted" style="font-size:12px">${(t.configs||[]).length<=1?'One configuration in this window so far: the first change will be judged here.':'none'}</div>`;
+  else h+=`<table class="curve"><tr><th>When</th><th>Change</th><th>Verdict</th><th style="text-align:right">Decode</th><th style="text-align:right">95 % interval</th><th style="text-align:right">Requests</th></tr>`
+    + ch.map(c=>{ const a=c.adjusted||{}, b=c.before_cfg||{}, f=c.after_cfg||{};
+        const diff=Object.keys(f).filter(k=>String(b[k])!==String(f[k])).map(k=>`${k} ${esc(b[k]??'?')}→${esc(f[k])}`).join(', ')||'(same summary)';
+        return `<tr><td class="mono">${new Date(c.at*1000).toLocaleString()}</td><td class="mono" style="font-size:11px">${diff}</td><td>${bnBadge(c.verdict)}</td>
+          <td class="num">${bnPct(a.pct)}</td><td class="num">${bnPct(a.pct_lo)} … ${bnPct(a.pct_hi)}</td><td class="num">${a.n_before??0} / ${a.n_after??0}</td></tr>`; }).join('')+'</table>';
+  $('#bntraffic').innerHTML=h;
+}
+async function bnDrawCal(){
+  const c=(await j('/api/bench/calibration')).latest;
+  if(!c){ $('#bncal').innerHTML=`<div class="muted" style="font-size:12px">Not calibrated yet. Calibrate measures the saved settings against themselves
+    several times and then runs the decision rule thousands of times on that noise: how often it would call identical settings different
+    (the false-win rate, which must stay within 5 %), and the smallest real difference it finds reliably. Without restarts it only
+    occupies the slot; with restarts it gives the honest between-restart figure.</div>`; return; }
+  const s=c.selftest||{};
+  const curve=(s.curve||[]).map(x=>`<tr><td>${bnPct(100*x.shift,0)}</td><td class="num">${Math.round(100*x.better)} %</td><td class="num">${x.mean_pairs.toFixed(1)}</td></tr>`).join('');
+  $('#bncal').innerHTML=`<div class="kv">
+      <div class="muted">Measured</div><div>${esc(c.at)} &middot; ${c.blocks} blocks &middot; ${esc(c.scope||'')}</div>
+      <div class="muted">Noise between blocks</div><div>${bnSd(c.between_sd_log)} <span class="muted">(within a block ${bnSd(c.within_sd_log)})</span></div>
+      <div class="muted">Same output every block</div><div>${c.deterministic_across_blocks?'yes: temperature-0 runs are reproducible here':'<b style="color:var(--warn)">no</b>: outputs differed between identical runs'}</div>
+      <div class="muted">False-win rate</div><div><b style="color:${s.false_win<=s.allowed?'var(--ok)':'var(--fail)'}">${s.false_win==null?'—':(100*s.false_win).toFixed(1)+' %'}</b> <span class="muted">allowed ${Math.round(100*(s.allowed||0.05))} %</span></div>
+      <div class="muted">Smallest reliable difference</div><div><b>${s.smallest_reliable==null?'over 8 %':bnPct(100*s.smallest_reliable,0)}</b> <span class="muted">found at least 80 % of the time</span></div>
+      <div class="muted">Pairs a comparison needs</div><div>${Object.entries(c.pairs_for||{}).map(([k,v])=>`${esc(k)}: ${v??'—'}`).join(' &middot; ')}</div>
+    </div>
+    <details style="margin-top:8px"><summary class="muted">Detection curve</summary>
+      <table class="curve"><tr><th>True difference</th><th style="text-align:right">called better</th><th style="text-align:right">pairs used</th></tr>${curve}</table>
+      <div class="basis">${esc(c.selftest_basis||'')}</div></details>`;
+}
+function bnDrawRuns(runs){
+  const sel=$('#bn_run'); const cur=BN_RUN||(runs[0]&&runs[0].id);
+  sel.innerHTML=runs.map(r=>`<option value="${escAttr(r.id)}"${r.id===cur?' selected':''}>${esc(r.id)} · ${esc(r.state)}${r.verdict?' · '+esc(r.verdict):''}</option>`).join('');
+  if(cur) bnShowRun(cur); else $('#bnrun').innerHTML='<div class="muted">no runs yet</div>';
+}
+async function bnShowRun(id){
+  BN_RUN=id;
+  const r=await j('/api/bench/run?id='+encodeURIComponent(id));
+  if(fail(r)){ $('#bnrun').innerHTML=`<div class="calcwarn">${esc(errOf(r))}</div>`; return; }
+  const res=r.result||{};
+  let h=`<div class="muted mono" style="font-size:11px">${esc(r.kind)} · ${esc(r.state)} · ${esc(r.started)} → ${esc(r.finished||'…')} · depths ${(r.shape&&r.shape.depths||[]).map(kfmt).join(', ')} (${esc(r.shape&&r.shape.source||'')}) · turn ${r.shape&&r.shape.turn_tokens} tok · output ${r.shape&&r.shape.output_tokens} tok</div>`;
+  if(r.error) h+=`<div class="calcwarn" style="margin-top:6px">${esc(r.error)}</div>`;
+  if(res.kind==='compare'){
+    h+=`<div style="margin-top:8px;font-size:14px">${bnBadge(res.verdict)} B (<span class="mono">${esc(Object.entries(res.candidate||{}).map(([k,v])=>k+'='+v).join(', '))}</span>)
+      finishes a typical request in <b>${bnPct(res.request_time_pct)}</b> time <span class="muted">(95 % interval ${bnPct(res.lo_pct)} … ${bnPct(res.hi_pct)}, ${res.pairs} pairs${res.precision_pct?', precision ±'+res.precision_pct.toFixed(1)+' %':''})</span></div>
+      <table class="curve" style="margin-top:8px"><tr><th>Depth</th><th style="text-align:right">Decode B vs A</th><th style="text-align:right">95 % interval</th><th>Verdict</th><th style="text-align:right">Acceptance A / B</th><th>Same output</th></tr>
+      ${Object.entries(res.per_depth||{}).map(([d,x])=>`<tr><td class="mono">${kfmt(+d)}</td><td class="num">${bnPct(x.pct)}</td><td class="num">${bnPct(x.pct_lo)} … ${bnPct(x.pct_hi)}</td><td>${bnBadge(x.verdict)}</td><td class="num">${x.accept_a??'—'} / ${x.accept_b??'—'}</td><td>${x.same_output?'yes':'no'}</td></tr>`).join('')}</table>`;
+  } else if(res.kind==='profile'){
+    h+=`<div style="margin-top:8px">A typical request of this workload: <b>${res.request_s??'—'} s</b> · effective decode <b>${res.decode_eff??'—'} t/s</b></div>
+      <table class="curve" style="margin-top:6px"><tr><th>Depth</th><th style="text-align:right">Decode t/s</th><th style="text-align:right">spread</th><th style="text-align:right">Acceptance</th><th style="text-align:right">Turn</th><th style="text-align:right">J / token</th><th>Reproducible</th></tr>
+      ${Object.entries(res.per_depth||{}).map(([d,x])=>`<tr><td class="mono">${kfmt(+d)}</td><td class="num"><b>${x.decode.mean?.toFixed(2)??'—'}</b></td><td class="num">${x.decode.cv!=null?bnSd(x.decode.cv):'—'}</td><td class="num">${x.accept??'—'}</td><td class="num">${x.turn_ms!=null?Math.round(x.turn_ms)+' ms':'—'}</td><td class="num">${x.j_per_tok??'—'}</td><td>${x.deterministic?'yes':'<b style="color:var(--warn)">no</b>'}</td></tr>`).join('')}</table>`;
+  } else if(res.kind==='goodput'){
+    h+=`<div style="margin-top:8px;font-size:13px">${res.slots??'?'} server slot(s) · ${kfmt(res.depth)} context per stream · target: first token ≤ ${res.slo.ttft_s} s and ≥ ${res.slo.decode_tps} t/s</div>
+      <table class="curve" style="margin-top:6px"><tr><th>Streams</th><th style="text-align:right">Throughput</th><th style="text-align:right">Decode per stream</th><th style="text-align:right">First token (worst)</th><th style="text-align:right">Met target</th></tr>
+      ${res.levels.map(x=>`<tr><td>${x.streams}</td><td class="num"><b>${x.throughput_tps}</b> t/s</td><td class="num">${x.decode_per_stream.mean?.toFixed(1)??'—'}</td><td class="num">${x.ttft_s.max?.toFixed(2)??'—'} s</td><td class="num">${x.met_slo}/${x.streams}</td></tr>`).join('')}</table>`;
+  } else if(res.kind==='calibrate'){
+    h+=`<div style="margin-top:8px;font-size:13px">False-win rate ${res.selftest?(100*res.selftest.false_win).toFixed(1)+' %':'—'} · smallest reliable difference ${res.selftest&&res.selftest.smallest_reliable!=null?bnPct(100*res.selftest.smallest_reliable,0):'—'} · noise between blocks ${bnSd(res.between_sd_log)} (see Calibration above)</div>`;
+  }
+  if((r.log||[]).length) h+=`<details style="margin-top:8px"><summary class="muted">Log</summary><pre>${esc(r.log.join('\n'))}</pre></details>`;
+  h+=`<div class="subrow"><button class="act danger" onclick="bnDelete('${escAttr(r.id)}')">Delete this run</button></div>`;
+  $('#bnrun').innerHTML=h;
+}
+async function bnStart(kind){
+  const body={kind, preset:$('#bn_preset').value, reps:+$('#bn_reps').value||3, n_predict:+$('#bn_np').value||128,
+              margin:(+$('#bn_margin').value||2)/100};
+  let warn='Bench occupies the server\'s only slot while it runs; real requests cancel its request and go first.';
+  if(kind==='profile') body.sampled_reps=+$('#bn_sampled').value||0;
+  if(kind==='calibrate'){ body.blocks=+$('#bn_blocks').value||6; body.restart=$('#bn_restart').checked;
+    if(body.restart){ body.allow_restart=true; warn+='\n\nIt RESTARTS the server between blocks: a request in flight at that moment is cut off.'; } }
+  if(kind==='compare'){
+    const cand={};
+    for(const line of $('#bn_cand').value.split('\n').map(x=>x.trim()).filter(Boolean)){
+      const m=line.match(/^([A-Za-z0-9_]+)\s*=\s*(.*)$/);
+      if(!m){ setMsg('#bnmsg','each line: KEY=value','var(--fail)'); return; }
+      cand[m[1].toUpperCase()]=m[2]; }
+    if(!Object.keys(cand).length){ setMsg('#bnmsg','add at least one KEY=value line','var(--fail)'); return; }
+    body.candidate=cand; body.allow_restart=true;
+    warn+='\n\nCompare RESTARTS the server for every switch between A and B (a request in flight is cut off), then puts the saved settings back.'; }
+  if(kind==='goodput'){ body.concurrency=$('#bn_conc').value.split(/[\s,]+/).filter(Boolean).map(Number);
+    body.goodput_depth=parseDepths($('#bn_gdepth').value)[0]||8192; body.slo_ttft_s=+$('#bn_ttft').value||10; body.slo_tps=+$('#bn_tps').value||15; }
+  if(!confirm(`Start a Bench ${kind} run on ${INST}?\n\n${warn}`)) return;
+  setMsg('#bnmsg','starting…');
+  const r=await pj('/api/bench/start',body);
+  if(fail(r)){ setMsg('#bnmsg','REJECTED: '+errOf(r),'var(--fail)'); return; }
+  setMsg('#bnmsg','running'); BN_RUN=r.id; bnLoad(true);
+}
+async function bnStop(){ const r=await pj('/api/bench/stop'); setMsg('#bnmsg',fail(r)?errOf(r):'stopping…'); setTimeout(()=>bnLoad(true),1500); }
+async function bnDelete(id){
+  if(!confirm('Delete run '+id+'?')) return;
+  const r=await pj('/api/bench/delete',{id});
+  if(fail(r)){ setMsg('#bnmsg',errOf(r),'var(--fail)'); return; }
+  BN_RUN=null; bnLoad(true);
+}
 
 // ---- stable-diffusion.cpp: generate + presets ----------------------------
 let SDJOB=null, SDGEN_INIT=null, SDGAL_AT=0;
@@ -3059,7 +3434,7 @@ async function openNewInstance(){
     + (Array.isArray(iprofs)?iprofs:[]).map(p=>`<option value="iprofile:${escAttr(p.name)}">instance profile: ${escAttr(p.name)} (${escAttr(p.model_name)})</option>`).join('')
     + (Array.isArray(profs)?profs:[]).map(p=>`<option value="profile:${escAttr(p.model)}:${escAttr(p.name)}">profile: ${escAttr(p.name)} (${escAttr(p.model_name)})</option>`).join('');
   $('#nimsg').textContent=r.user_manager&&!r.user_manager.linger
-    ?'note: linger is off - instances stop at logout and cannot start at boot until: sudo loginctl enable-linger smbadmin':'';
+    ?'note: linger is off - instances stop at logout and cannot start at boot until: '+(r.user_manager.fix||'sudo loginctl enable-linger '+RUN_USER):'';
   niEngine();
 }
 
@@ -3091,7 +3466,7 @@ function niDevices(){
 function niDevice(){
   const d=DEVICES.find(x=>x.pci===$('#ni_dev').value); if(!d) return;
   const was=new Set([...document.querySelectorAll('#ni_extra input:checked')].map(i=>i.value));
-  const acE=$('#ni_engine')&&['audio.cpp','camelid','onnx'].includes($('#ni_engine').value);
+  const acE=$('#ni_engine')&&['audio.cpp','camelid','onnx','vllm'].includes($('#ni_engine').value);
   const cmE=$('#ni_engine')&&$('#ni_engine').value==='camelid';
   const others=acE?[]:DEVICES.filter(x=>x.usable&&x.pci!=='cpu'&&x.pci!==d.pci&&d.pci!=='cpu');
   $('#ni_extra').innerHTML=others.length?others.map(x=>`<label style="display:block;margin:2px 0;color:var(--fg)">`
@@ -3696,7 +4071,7 @@ async function drawOptResults(force, live){
       <td class="num">${n1(m.peak_junction,0)}</td><td class="num">${n1(m.avg_power_w,0)}</td>
       <td class="num">${c.speed_ratio!=null?n1(c.speed_ratio,2)+'x':'—'}</td>
       <td class="num"><b>${c.score!=null?n1(c.score,3):'—'}</b></td>
-      <td class="acts">${canApply?`<button class="act" onclick="optApply('${c.id}','params')">Apply</button><button class="act" onclick="optApply('${c.id}','profile')">Save as profile</button>`:''}
+      <td class="acts">${canApply?`<button class="act" onclick="optApply('${c.id}','params')">Apply</button><button class="act" onclick="optApply('${c.id}','profile')">Save as profile</button>`:''}${canApply&&Object.keys(c.launch||{}).length?`<button class="act" onclick="optBench('${c.id}')" title="measure it against your saved settings on the Bench tab, with an interval and a verdict">Confirm with Bench</button>`:''}
         ${m.tasks?`<details><summary class="muted" style="cursor:pointer;font-size:11px">tasks</summary><div class="taskgrid">${Object.entries(m.tasks).map(([t,v])=>`<span style="color:${v.passed===v.runs?'var(--ok)':(v.passed?'var(--warn)':'var(--fail)')}">${escAttr(t)} ${v.passed}/${v.runs}</span>`).join('')}</div></details>`:''}</td></tr>`;
   }).join('');
   const recC=(r.candidates||[]).find(c=>c.id===rec);
@@ -3715,6 +4090,15 @@ async function drawOptResults(force, live){
     <div class="muted" style="font-size:11px;margin-top:6px">Speed is the geometric mean of decode, prefill, turn and suite-time ratios against the baseline. ≈ quality on launch candidates is the baseline's, confirmed by the sanity tasks. Per-request detail: <code>panel/optimize/${escAttr(r.id)}/trials.jsonl</code></div>`;
 }
 
+function optBench(cid){
+  const c=(OPTRUN.candidates||[]).find(x=>x.id===cid); if(!c) return;
+  const lines=Object.entries(c.launch||{}).map(([k,v])=>`${k}=${v}`);
+  if(!lines.length){ setMsg('#optresmsg','Bench compares launch settings; this candidate only changes sampling','var(--warn)'); return; }
+  document.querySelectorAll('nav button').forEach(b=>{ if(b.dataset.t==='bench') b.click(); });
+  $('#bn_cand').value=lines.join('\n');
+  const d=$('#bn_cand').closest('details'); if(d) d.open=true;
+  setMsg('#bnmsg','filled in from optimizer run '+OPTRUN.id+': check it, then press Compare');
+}
 async function optApply(cid,target){
   const c=(OPTRUN.candidates||[]).find(x=>x.id===cid); if(!c) return;
   let name=null;
@@ -3980,9 +4364,9 @@ async function drawPowerCap(){
           value="${d.saved_w??d.cap_w??d.default_w}" style="width:90px;display:inline-block" aria-label="cap in watts for ${escAttr(d.pci)}"> W
         <button class="act" onclick="setPowerCap('${escAttr(d.pci)}','${id}')">Apply</button>`:''}
         ${d.saved_w!=null?`<button class="act danger" onclick="clearPowerCap('${escAttr(d.pci)}')">Clear</button>`:''}</td></tr>`;}).join('');
-  $('#gpgrant').innerHTML=r.grant_needed?`<div class="calcwarn">The panel runs as <code>smbadmin</code> and
+  $('#gpgrant').innerHTML=r.grant_needed?`<div class="calcwarn">The panel runs as <code>${escAttr(RUN_USER)}</code> and
     <code>power1_cap</code> is root-only. Run this once on the box (it installs
-    <code>${escAttr(r.rule_file)}</code>, which makes the cap group-writable for smbadmin on every boot):
+    <code>${escAttr(r.rule_file)}</code>, which makes the cap group-writable for ${escAttr(RUN_USER)} on every boot):
     <pre class="mono" style="white-space:pre-wrap;user-select:all">${escAttr(r.grant_cmd)}</pre></div>`:'';
 }
 async function _gpPost(u,body){
@@ -4913,7 +5297,7 @@ async function fitImportImatrix(){
   $('#f_impmsg').textContent=r.error||`imported: ${r.entries} entries`+(r.coverage?`, covers ${r.coverage.covered}/${r.coverage.total} weights`:''); if(!r.error) fitLoad(); }
 function fitConvKind(){
   const k=$('#f_ckind').value;
-  const d={mmproj:['Q8_0','','/home/smbadmin/models/mmproj-F16.gguf','mmproj-Q8_0.gguf'],
+  const d={mmproj:['Q8_0','',(HOME_DIR||'~')+'/models/mmproj-F16.gguf','mmproj-Q8_0.gguf'],
            'sd.cpp':['q8_0','^vae\\.=f16','',''],'audio.cpp':['q8_0','','','']}[k]||['Q8_0','','',''];
   $('#f_ctype').value=d[0]; $('#f_crules').value=d[1]; $('#f_cin').placeholder=d[2]||'input model path'; $('#f_cname').placeholder=d[3]||'output name.gguf';
   $('#f_crules').placeholder=k==='sd.cpp'?'pattern=type,pattern=type':(k==='audio.cpp'?'prefix*=type,prefix*=type':'(not used)');
@@ -5711,7 +6095,7 @@ function afDraw(){
       return `<tr><td class="mono" style="font-size:11px">${esc((e.started||'').replace('T',' ').slice(0,16))}</td>
         <td><b>${esc(e.kind)}</b>${e.manual?' <span class="badge neutral">by hand</span>':''}<div class="muted" style="font-size:11px">${esc(e.reason||'')}</div></td>
         <td style="font-size:12px"><span class="badge ${rb?'fail':e.state==='done'?(e.decision==='applied'?'ok':'neutral'):e.state==='running'?'warn':'fail'}">${esc(dec)}</span> ${esc(e.outcome||'')}${e.restart_error?`<div class="calcwarn">${esc(e.restart_error)}</div>`:''}</td>
-        <td style="font-size:12px">${v.state?`<span class="badge ${vb[v.state]||'neutral'}">${esc(v.state)}</span>${v.ratio!=null?` ${wlPct(v.ratio)} of before (${v.matched} requests)`:''}${v.note?`<div class="muted">${esc(v.note)}</div>`:''}`:''}${rb?`<div class="muted">rolled back by ${esc(rb.by)}: ${esc(rbn)}</div>`:''}</td>
+        <td style="font-size:12px">${v.state?`<span class="badge ${vb[v.state]||'neutral'}">${esc(v.state)}</span>${v.ratio!=null?` ${wlPct(v.ratio)} of before (${v.matched} requests)`:''}${v.effect?` <span class="mono">${bnPct(v.effect.pct,1)} [${bnPct(v.effect.lo,1)} … ${bnPct(v.effect.hi,1)}]</span>${v.effect.adjusted?' <span class="muted">acceptance-adjusted</span>':''}`:''}${v.state==='pending'&&v.need?` <span class="muted">${v.n_after||0}/${v.need} requests</span>`:''}${v.note?`<div class="muted">${esc(v.note)}</div>`:''}`:''}${rb?`<div class="muted">rolled back by ${esc(rb.by)}: ${esc(rbn)}</div>`:''}</td>
         <td class="acts">${e.decision==='applied'&&!rb?`<button class="act danger" onclick="afRollback('${escAttr(e.id)}')">Roll back</button>`:''}</td></tr>`;}).join('')+'</table>'
     :'<div class="muted">No experiments yet.</div>';
 }
@@ -5756,21 +6140,74 @@ async function drawHermes(){
 </script>
 <script>
 // ---------------------------------------------------------------- Fleet
+let FL=null, FL_SET=null;
+const FL_ACT={'instance.start':'start','instance.stop':'stop','instance.restart':'safe restart','instance.set':'change model / sizing (then safe restart)'};
+const flBadge=s=>`<span class="badge ${({ok:'ok',running:'warn',sent:'warn',queued:'neutral',failed:'fail',refused:'fail',expired:'fail'})[s]||'neutral'}">${esc(s)}</span>`;
+const flWhen=t=>t?new Date(t*1000).toLocaleTimeString():'';
+function flMay(b,a,iid){ const r=b.remote||{}, ins=r.instances||[]; return (r.allow||[]).includes(a)&&(ins.includes('*')||ins.includes(iid)); }
+function flInst(b,bi,i,ii){
+  const btn=(a,label)=>flMay(b,a,i.id)?` <button class="act" style="padding:1px 7px;font-size:11px" onclick="flAct(${bi},${ii},'${a}')">${label}</button>`:'';
+  const btns=b.state!=='online'?'':(i.state==='running'?btn('instance.restart','restart')+btn('instance.stop','stop'):btn('instance.start','start'))
+    +(flMay(b,'instance.set',i.id)?` <button class="act" style="padding:1px 7px;font-size:11px" onclick="flSetOpen(${bi},${ii})">change…</button>`:'');
+  return `${esc(i.name||i.id)}: ${esc(i.engine||'')} · <b>${esc(i.state||'')}</b> · ${esc(i.model||'')}${i.workload&&i.workload.decode_p50?' · '+esc(i.workload.decode_p50)+' t/s':''}${i.autofit&&i.autofit.pending?' · '+esc(i.autofit.pending)+' proposal':''}${btns}`;
+}
+function flActions(b,bi){
+  const A=b.actions||[], H=(b.holds||[]).filter(x=>x.held); if(!A.length&&!H.length) return '';
+  return `<tr><td colspan="5" style="font-size:11px;padding-top:0">${A.slice(0,5).map((a,ai)=>`<div>${flWhen(a.updated)} ${flBadge(a.state)} <span class="mono">${esc(a.action)}</span> ${esc((a.args||{}).instance||'')}${a.args&&a.args.params?' <span class="mono">'+esc(Object.entries(a.args.params).map(([k,v])=>k+'='+v).join(' '))+'</span>':''} · ${esc(a.detail||'')}${a.restart&&a.restart.downtime_s!=null?' · down '+esc(a.restart.downtime_s)+' s':''}${a.held_at_primary?' · '+esc(a.held_at_primary)+' request(s) held here, none failed over the restart':''} <span class="muted">by ${esc(a.by||'')}</span>${['queued','sent'].includes(a.state)?` <button class="act" style="padding:0 6px;font-size:11px" onclick="flCancel(${bi},${ai})">cancel</button>`:''}</div>`).join('')}${H.slice(0,3).map(x=>`<div class="muted">${flWhen(x.at)} gateway held ${esc(x.held)} request(s) for ${esc(x.s)} s while ${esc(x.instance)} restarted${x.expired?' ('+esc(x.expired)+' waited past the hold)':''}</div>`).join('')}</td></tr>`;
+}
 async function flLoad(form){
-  const d=await j('/api/fleet'); if(!d||d.error) return;
+  const d=await j('/api/fleet'); if(!d||d.error) return; FL=d;
   if(form){ $('#fl_role').value=d.role; $('#fl_name').value=d.name; $('#fl_url').value=d.primary_url||''; $('#fl_share').checked=!!d.share; }
+  $('#fl_remote_card').style.display=d.role==='member'?'':'none';
+  if(d.role==='member'){ const r=d.remote||{};
+    if(form||!$('#fl_allow').innerHTML){ $('#fl_allow').innerHTML=(d.actions||[]).map(a=>`<label style="display:flex;gap:6px;align-items:center;font-size:12px;margin-right:12px"><input type="checkbox" class="fl_al" value="${escAttr(a)}" ${(r.allow||[]).includes(a)?'checked':''} style="width:auto"> ${esc(FL_ACT[a]||a)}</label>`).join('');
+      $('#fl_insts').value=(r.instances||['*']).join(', '); $('#fl_http').checked=!!r.allow_http; }
+    const http=(d.primary_url||'').startsWith('http://');
+    $('#fl_rstate').innerHTML=!(r.allow||[]).length?'<span class="muted">Off: the primary cannot change anything here.</span>'
+      :`On: ${esc((r.allow||[]).map(a=>FL_ACT[a]||a).join(', '))} for ${esc((r.instances||[]).join(', '))}. Action key: ${r.key_fp?'<span class="mono">'+esc(r.key_fp)+'</span> (compare with the primary)':'<i>arrives with the next report</i>'}.`
+        +(http&&!r.allow_http?' <b style="color:var(--fail)">The primary is plain http: commands are refused until you allow that.</b>':'')
+        +(r.running?`<div>Running now: <span class="mono">${esc(r.running.action)}</span> ${esc((r.running.args||{}).instance||'')} since ${flWhen(r.running.started)}</div>`:'');
+    const L=r.log||[];
+    $('#fl_rlog').innerHTML=!L.length?'':'<table class="opt"><tr><th>when</th><th>command</th><th>state</th><th>detail</th><th>from</th></tr>'+L.map(x=>`<tr><td>${flWhen(x.at)}</td><td class="mono">${esc(x.action||'')} ${esc(x.instance||'')}</td><td>${flBadge(x.state)}</td><td style="font-size:12px">${esc(x.detail||'')}</td><td class="muted">${esc(x.by||'')}</td></tr>`).join('')+'</table>';
+  }
   const ls=d.last_send;
   $('#fl_state').innerHTML=d.role==='member'?(d.joined?`Joined. Last report: ${ls?(ls.ok?'<span style="color:var(--ok)">delivered</span>':'<span style="color:var(--fail)">failed</span> '+esc(ls.error||('HTTP '+ls.status))):'not sent yet'}`:'Not joined: paste a join code and Save.')
     :d.role==='primary'?`Primary: ${(d.boxes||[]).length} box(es). Box id ${esc(d.box_id)}`:'Standalone: no fleet traffic.';
   const B=d.boxes||[], sb={online:'ok',stale:'warn',offline:'fail'};
   $('#fl_boxes').innerHTML=d.role!=='primary'?'<div class="muted">Only the primary lists boxes.</div>':!B.length?'<div class="muted">No boxes yet: "Add a box" makes a join code for one.</div>':
-    '<table class="opt"><tr><th>box</th><th>state</th><th>hardware</th><th>instances</th><th></th></tr>'+B.map(b=>{ const r=b.report||{}, h=r.hardware||{};
+    '<table class="opt"><tr><th>box</th><th>state</th><th>hardware</th><th>instances</th><th></th></tr>'+B.map((b,bi)=>{ const r=b.report||{}, h=r.hardware||{}, rm=b.remote||{};
       return `<tr><td><b>${esc(b.name||b.box_id)}</b><div class="muted" style="font-size:11px">${esc(r.lexipanel?'LexiPanel '+r.lexipanel:'')} ${esc(r.os||'')}</div></td>
         <td><span class="badge ${sb[b.state]||'neutral'}">${esc(b.state)}</span>${b.age_s!=null?`<div class="muted" style="font-size:11px">${b.age_s} s ago</div>`:''}</td>
         <td style="font-size:12px">${(h.gpus||[]).map(g=>esc(g.name||'')).join('<br>')||'CPU'}${(h.npus||[]).length?'<br>NPU: '+h.npus.map(n=>esc(n.vendor||'')).join(', '):''}${h.ram_mib?`<div class="muted">${Math.round(h.ram_mib/1024)} GiB RAM</div>`:''}</td>
-        <td style="font-size:12px">${(r.instances||[]).map(i=>`${esc(i.name||i.id)}: ${esc(i.engine||'')} · <b>${esc(i.state||'')}</b> · ${esc(i.model||'')}${i.workload&&i.workload.decode_p50?' · '+esc(i.workload.decode_p50)+' t/s':''}${i.autofit&&i.autofit.pending?' · '+i.autofit.pending+' proposal':''}`).join('<br>')}</td>
-        <td class="acts"><button class="act danger" onclick="flRevoke('${escAttr(b.box_id)}')">Revoke</button></td></tr>`;}).join('')+'</table>';
+        <td style="font-size:12px">${(r.instances||[]).map((i,ii)=>flInst(b,bi,i,ii)).join('<br>')}
+          <div class="muted" style="font-size:11px;margin-top:3px">remote actions: ${(rm.allow||[]).length?esc(rm.allow.map(a=>FL_ACT[a]||a).join(', '))+' · key '+esc(rm.key||''):'off (the box has not allowed any)'}</div></td>
+        <td class="acts">${b.drain?'<span class="badge warn">drained</span> ':''}<button class="act" onclick="flDrain(${bi})" title="${b.drain?'Send it gateway requests again':'The gateway sends this box nothing new; requests in flight finish'}">${b.drain?'Undrain':'Drain'}</button>
+          ${(rm.allow||[]).length?`<button class="act" onclick="flRekey(${bi})" title="A new action key, sent with its next report; the old one stops working">Re-key</button>`:''}
+          <button class="act danger" onclick="flRevoke('${escAttr(b.box_id)}')">Revoke</button></td></tr>`+flActions(b,bi);}).join('')+'</table>';
 }
+async function flAct(bi,ii,a){ const b=(FL.boxes||[])[bi], i=b&&((b.report||{}).instances||[])[ii]; if(!i) return;
+  if(!confirm(`${FL_ACT[a]||a}: ${i.name||i.id} on ${b.name||b.box_id}?\nIt runs at that box's next report (within about a minute), through its own checks.`)) return;
+  const r=await fj('/api/fleet/action',{box_id:b.box_id,action:a,args:{instance:i.id}});
+  $('#fl_msg').textContent=r.error||`sent: ${a} ${i.id} (${r.id})`; flLoad(); }
+function flSetOpen(bi,ii){ const b=(FL.boxes||[])[bi], i=b&&((b.report||{}).instances||[])[ii]; if(!i) return;
+  FL_SET={box_id:b.box_id,instance:i.id}; $('#fl_set_target').textContent=`${b.name||b.box_id} / ${i.name||i.id}`;
+  $('#fl_set_keys').textContent=(FL.set_keys||[]).join(' '); $('#fl_set_msg').textContent=''; $('#fl_set').style.display=''; $('#fl_set_kv').focus(); }
+function flSetClose(){ FL_SET=null; $('#fl_set').style.display='none'; }
+async function flSetSend(){ if(!FL_SET) return; const params={};
+  for(const l of $('#fl_set_kv').value.split('\n')){ const t=l.trim(); if(!t) continue; const at=t.indexOf('=');
+    if(at<1){ $('#fl_set_msg').textContent='one KEY=VALUE per line'; return; } params[t.slice(0,at).trim()]=t.slice(at+1).trim(); }
+  if(!Object.keys(params).length){ $('#fl_set_msg').textContent='nothing to send'; return; }
+  const r=await fj('/api/fleet/action',{box_id:FL_SET.box_id,action:'instance.set',args:{instance:FL_SET.instance,params,restart:$('#fl_set_restart').checked}});
+  $('#fl_set_msg').textContent=r.error||`sent (${r.id}): runs at the box's next report`; if(!r.error) flLoad(); }
+async function flCancel(bi,ai){ const b=(FL.boxes||[])[bi], a=b&&(b.actions||[])[ai]; if(!a) return;
+  const r=await fj('/api/fleet/action/cancel',{box_id:b.box_id,id:a.id}); $('#fl_msg').textContent=r.error||'cancelled'; flLoad(); }
+async function flDrain(bi){ const b=(FL.boxes||[])[bi]; if(!b) return;
+  const r=await fj('/api/fleet/drain',{box_id:b.box_id,on:!b.drain}); $('#fl_msg').textContent=r.error||(r.drain?'drained: the gateway sends it nothing new':'back in the gateway'); flLoad(); }
+async function flRekey(bi){ const b=(FL.boxes||[])[bi]; if(!b||!confirm('Make a new action key for this box? It is sent with its next report; commands signed with the old one are refused.')) return;
+  const r=await fj('/api/fleet/rekey',{box_id:b.box_id}); $('#fl_msg').textContent=r.error||`new key ${r.key_fp}: sent with its next report`; flLoad(); }
+async function flPolicy(){ const allow=[...document.querySelectorAll('.fl_al')].filter(x=>x.checked).map(x=>x.value);
+  const r=await fj('/api/fleet/policy',{allow,instances:$('#fl_insts').value||'*',allow_http:$('#fl_http').checked});
+  $('#fl_pmsg').textContent=r.error||'saved'; flLoad(true); }
 async function flSave(){ const r=await fj('/api/fleet/settings',{role:$('#fl_role').value,name:$('#fl_name').value,primary_url:$('#fl_url').value,share:$('#fl_share').checked,code:$('#fl_code').value.trim()||undefined});
   $('#fl_msg').textContent=r.error||'saved'; if(!r.error) $('#fl_code').value=''; flLoad(true); }
 async function flCode(){ const r=await fj('/api/fleet/join-code'); $('#fl_msg').textContent=r.error||`join code (valid ${r.valid_min} min, once): ${r.code}`; }
