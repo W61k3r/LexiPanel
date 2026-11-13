@@ -1,3 +1,5 @@
+THIS PROJECT IS DEPRECIATED AND RELEASED OPEN SOURCE [WILL NOT BE UPDATED, FORK TO CONTINUE]: The Project was migrated from exclusively python to an entire rust ecosystem. Visit https://github.com/W61k3r/LexiSuite-Releases, Lexipanel.com, and https://huggingface.co/Wa1k3r/LexiSuite for my latest works.
+
 # LexiPanel
 
 **Most tools run local AI. LexiPanel fits it: measuring your exact hardware and real workload,
